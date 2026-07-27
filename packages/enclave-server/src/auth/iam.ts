@@ -1,6 +1,14 @@
 import { CryptoEngine } from '../crypto/crypto-engine.js';
 
-export type EnclaveOperation = 'Encrypt' | 'Decrypt' | 'GenerateKey' | 'RotateKey' | 'GetKey' | '*';
+export type EnclaveOperation =
+  | 'Encrypt'
+  | 'Decrypt'
+  | 'GenerateKey'
+  | 'RotateKey'
+  | 'RevokeKey'
+  | 'GetKey'
+  | 'ExportAudit'
+  | '*';
 
 export interface ServiceIdentity {
   serviceId: string;
@@ -70,6 +78,11 @@ export class IAMManager {
 
     if (!hasOpPermission) {
       return false;
+    }
+
+    // System-wide non-key operations
+    if (keyAlias === '*' || operation === 'ExportAudit') {
+      return true;
     }
 
     const hasKeyPermission =

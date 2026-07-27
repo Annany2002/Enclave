@@ -11,6 +11,7 @@ interface MetricsState {
   decryptOps: number;
   rotateOps: number;
   generateOps: number;
+  revokeOps: number;
 }
 
 const metrics: MetricsState = {
@@ -19,6 +20,7 @@ const metrics: MetricsState = {
   decryptOps: 0,
   rotateOps: 0,
   generateOps: 0,
+  revokeOps: 0,
 };
 
 export function registerEnclaveRoutes(
@@ -37,14 +39,12 @@ export function registerEnclaveRoutes(
 
     let identity = null;
 
-    // 1. Try Bearer Token Authentication
     const authHeader = request.headers.authorization;
     if (authHeader && authHeader.startsWith('Bearer ')) {
       const token = authHeader.substring(7);
       identity = iam.authenticateToken(token);
     }
 
-    // 2. Try mTLS Client Certificate Header
     if (!identity) {
       const certCnHeader = (request.headers['x-client-cert-cn'] || request.headers['x-forwarded-client-cert']) as string;
       if (certCnHeader) {
@@ -87,10 +87,23 @@ export function registerEnclaveRoutes(
       `enclave_crypto_operations_total{operation="decrypt"} ${metrics.decryptOps}`,
       `enclave_crypto_operations_total{operation="rotate"} ${metrics.rotateOps}`,
       `enclave_crypto_operations_total{operation="generate"} ${metrics.generateOps}`,
+      `enclave_crypto_operations_total{operation="revoke"} ${metrics.revokeOps}`,
       '# HELP enclave_unsealed_status Unseal status of master key',
       '# TYPE enclave_unsealed_status gauge',
       `enclave_unsealed_status ${keyManager.isUnsealed() ? 1 : 0}`,
     ].join('\n');
+  });
+
+  // Export Audit Logs
+  fastify.get('/api/v1/audit/export', async (request, reply) => {
+    const identity = (request as any).identity;
+    if (!iam.authorize(identity, '*', 'ExportAudit')) {
+      reply.code(403).send({ error: 'Forbidden', message: 'Unauthorized to export audit logs' });
+      return;
+    }
+
+    const logs = await storage.exportAuditLogs();
+    return { logs };
   });
 
   // Generate a new DEK
@@ -220,6 +233,61 @@ export function registerEnclaveRoutes(
     }
   );
 
+  // Key Revocation endpoint
+  fastify.post<{ Body: { keyAlias: string } }>(
+    '/api/v1/keys/revoke',
+    {
+      schema: {
+        body: {
+          type: 'object',
+          required: ['keyAlias'],
+          properties: {
+            keyAlias: { type: 'string' },
+          },
+        },
+      },
+    },
+    async (request, reply) => {
+      metrics.revokeOps++;
+      const identity = (request as any).identity;
+      const { keyAlias } = request.body;
+
+      if (!iam.authorize(identity, keyAlias, 'RevokeKey')) {
+        await storage.logAudit({
+          serviceId: identity.serviceId,
+          action: 'RevokeKey',
+          status: 'DENIED',
+          ipAddress: request.ip,
+        });
+        reply.code(403).send({ error: 'Forbidden', message: `Unauthorized to revoke key ${keyAlias}` });
+        return;
+      }
+
+      const existing = await storage.getKeyByAlias(keyAlias);
+      if (!existing || existing.state === 'REVOKED') {
+        reply.code(404).send({ error: 'Not Found', message: `Active key not found for alias ${keyAlias}` });
+        return;
+      }
+
+      const revokedRecord = await storage.revokeKey(existing.id);
+
+      await storage.logAudit({
+        serviceId: identity.serviceId,
+        action: 'RevokeKey',
+        keyId: existing.id,
+        status: 'SUCCESS',
+        ipAddress: request.ip,
+      });
+
+      return {
+        id: revokedRecord.id,
+        alias: revokedRecord.alias,
+        state: revokedRecord.state,
+        updatedAt: revokedRecord.updatedAt,
+      };
+    }
+  );
+
   // Encrypt payload
   fastify.post<{ Body: { keyAlias: string; plaintext: string } }>(
     '/api/v1/crypto/encrypt',
@@ -247,7 +315,7 @@ export function registerEnclaveRoutes(
 
       const keyRecord = await storage.getKeyByAlias(keyAlias);
       if (!keyRecord || keyRecord.state !== 'ENABLED') {
-        reply.code(404).send({ error: 'Not Found', message: `Active key not found for alias ${keyAlias}` });
+        reply.code(410).send({ error: 'Gone', message: `Key ${keyAlias} is disabled or revoked` });
         return;
       }
 
@@ -302,7 +370,7 @@ export function registerEnclaveRoutes(
 
       const keyRecord = await storage.getKeyByAlias(keyAlias);
       if (!keyRecord || keyRecord.state !== 'ENABLED') {
-        reply.code(404).send({ error: 'Not Found', message: `Active key not found for alias ${keyAlias}` });
+        reply.code(410).send({ error: 'Gone', message: `Key ${keyAlias} is disabled or revoked` });
         return;
       }
 
@@ -354,7 +422,7 @@ export function registerEnclaveRoutes(
 
       const keyRecord = await storage.getKeyByAlias(keyAlias);
       if (!keyRecord || keyRecord.state !== 'ENABLED') {
-        reply.code(404).send({ error: 'Not Found', message: `Active key not found for alias ${keyAlias}` });
+        reply.code(410).send({ error: 'Gone', message: `Key ${keyAlias} is disabled or revoked` });
         return;
       }
 

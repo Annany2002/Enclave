@@ -40,7 +40,10 @@ export interface IStorageAdapter {
     newVersion: number
   ): Promise<StoredKeyRecord>;
 
+  revokeKey(id: string): Promise<StoredKeyRecord>;
+
   logAudit(record: Omit<AuditRecord, 'id' | 'timestamp'>): Promise<void>;
+  exportAuditLogs(): Promise<AuditRecord[]>;
 }
 
 export class InMemoryStorageAdapter implements IStorageAdapter {
@@ -101,6 +104,17 @@ export class InMemoryStorageAdapter implements IStorageAdapter {
     return existing;
   }
 
+  public async revokeKey(id: string): Promise<StoredKeyRecord> {
+    const existing = this.keys.get(id);
+    if (!existing) {
+      throw new Error(`Key record not found for ID: ${id}`);
+    }
+
+    existing.state = 'REVOKED';
+    existing.updatedAt = new Date();
+    return existing;
+  }
+
   public async logAudit(record: Omit<AuditRecord, 'id' | 'timestamp'>): Promise<void> {
     this.auditLogs.push({
       id: crypto.randomUUID(),
@@ -109,7 +123,7 @@ export class InMemoryStorageAdapter implements IStorageAdapter {
     });
   }
 
-  public getAuditLogs(): AuditRecord[] {
+  public async exportAuditLogs(): Promise<AuditRecord[]> {
     return [...this.auditLogs];
   }
 }

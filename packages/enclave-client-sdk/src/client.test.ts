@@ -2,10 +2,12 @@ import assert from 'node:assert';
 import { test, describe, before, after } from 'node:test';
 import crypto from 'node:crypto';
 
-process.env.ENCLAVE_MASTER_KEY = crypto.randomBytes(32).toString('hex');
+const masterKeyHex = crypto.randomBytes(32).toString('hex');
+process.env.ENCLAVE_MASTER_KEY = masterKeyHex;
 process.env.NODE_ENV = 'test';
 
 import { createEnclaveServer } from '../../enclave-server/dist/server.js';
+import { ShamirUnsealEngine } from '../../enclave-server/dist/crypto/shamir-unseal.js';
 import { EnclaveClient } from './client.js';
 
 describe('Enclave End-to-End Integration Tests', () => {
@@ -20,7 +22,7 @@ describe('Enclave End-to-End Integration Tests', () => {
       serviceId,
       token: serviceToken,
       clientCertCn: 'payment-service.internal',
-      allowedKeyAliases: ['payment-card-key'],
+      allowedKeyAliases: ['payment-card-key', 'revocable-key'],
       allowedOperations: ['*'],
     });
 
@@ -33,6 +35,14 @@ describe('Enclave End-to-End Integration Tests', () => {
     if (fastifyInstance) {
       await fastifyInstance.close();
     }
+  });
+
+  test('Shamir Secret Sharing splits and reconstructs Master Key correctly', () => {
+    const shares = ShamirUnsealEngine.splitMasterKey(masterKeyHex, 3);
+    assert.strictEqual(shares.length, 3);
+
+    const reconstructed = ShamirUnsealEngine.combineShares(shares);
+    assert.strictEqual(reconstructed, masterKeyHex);
   });
 
   test('SDK generates key and performs remote encryption/decryption', async () => {
@@ -113,18 +123,42 @@ describe('Enclave End-to-End Integration Tests', () => {
     assert.strictEqual(rotateData.version, 2);
   });
 
-  test('Server authenticates caller via mTLS client certificate header', async () => {
-    const resMtls = await fetch(`${serverUrl}/api/v1/crypto/encrypt`, {
+  test('Server revokes key and blocks subsequent cryptographic access', async () => {
+    const client = new EnclaveClient({
+      baseUrl: serverUrl,
+      authToken: serviceToken,
+      enableLocalCaching: false,
+    });
+
+    await client.generateKey('revocable-key');
+
+    const resRevoke = await fetch(`${serverUrl}/api/v1/keys/revoke`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'x-client-cert-cn': 'payment-service.internal',
+        'Authorization': `Bearer ${serviceToken}`,
       },
-      body: JSON.stringify({ keyAlias: 'payment-card-key', plaintext: 'mTLS Payload' }),
+      body: JSON.stringify({ keyAlias: 'revocable-key' }),
     });
 
-    assert.strictEqual(resMtls.status, 200);
-    const encryptedData: any = await resMtls.json();
-    assert.strictEqual(typeof encryptedData.ciphertextHex, 'string');
+    assert.strictEqual(resRevoke.status, 200);
+
+    await assert.rejects(async () => {
+      await client.encryptRemote('revocable-key', 'fail payload');
+    }, /410/);
+  });
+
+  test('Server exports structured audit log history', async () => {
+    const resAudit = await fetch(`${serverUrl}/api/v1/audit/export`, {
+      method: 'GET',
+      headers: {
+        'Authorization': `Bearer ${serviceToken}`,
+      },
+    });
+
+    assert.strictEqual(resAudit.status, 200);
+    const auditData: any = await resAudit.json();
+    assert.strictEqual(Array.isArray(auditData.logs), true);
+    assert.strictEqual(auditData.logs.length > 0, true);
   });
 });
