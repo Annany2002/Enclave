@@ -3,7 +3,23 @@ import crypto from 'node:crypto';
 import { MasterKeyManager } from '../crypto/master-key.js';
 import { CryptoEngine } from '../crypto/crypto-engine.js';
 import { IStorageAdapter } from '../storage/storage-adapter.js';
-import { IAMManager, EnclaveOperation } from '../auth/iam.js';
+import { IAMManager } from '../auth/iam.js';
+
+interface MetricsState {
+  totalRequests: number;
+  encryptOps: number;
+  decryptOps: number;
+  rotateOps: number;
+  generateOps: number;
+}
+
+const metrics: MetricsState = {
+  totalRequests: 0,
+  encryptOps: 0,
+  decryptOps: 0,
+  rotateOps: 0,
+  generateOps: 0,
+};
 
 export function registerEnclaveRoutes(
   fastify: FastifyInstance,
@@ -13,21 +29,31 @@ export function registerEnclaveRoutes(
 ): void {
   // Authentication middleware
   fastify.addHook('onRequest', async (request: FastifyRequest, reply: FastifyReply) => {
-    if (request.url === '/healthz' || request.url === '/readyz') {
+    metrics.totalRequests++;
+
+    if (request.url === '/healthz' || request.url === '/readyz' || request.url === '/metrics') {
       return;
     }
 
+    let identity = null;
+
+    // 1. Try Bearer Token Authentication
     const authHeader = request.headers.authorization;
-    if (!authHeader || !authHeader.startsWith('Bearer ')) {
-      reply.code(401).send({ error: 'Unauthorized', message: 'Missing or invalid Authorization header' });
-      return;
+    if (authHeader && authHeader.startsWith('Bearer ')) {
+      const token = authHeader.substring(7);
+      identity = iam.authenticateToken(token);
     }
 
-    const token = authHeader.substring(7);
-    const identity = iam.authenticate(token);
+    // 2. Try mTLS Client Certificate Header
+    if (!identity) {
+      const certCnHeader = (request.headers['x-client-cert-cn'] || request.headers['x-forwarded-client-cert']) as string;
+      if (certCnHeader) {
+        identity = iam.authenticateMtlsCert(certCnHeader);
+      }
+    }
 
     if (!identity) {
-      reply.code(403).send({ error: 'Forbidden', message: 'Invalid authentication credentials' });
+      reply.code(403).send({ error: 'Forbidden', message: 'Invalid or missing authentication credentials' });
       return;
     }
 
@@ -48,6 +74,25 @@ export function registerEnclaveRoutes(
     return { status: 'ready' };
   });
 
+  // Prometheus Metrics endpoint
+  fastify.get('/metrics', async (request, reply) => {
+    reply.header('Content-Type', 'text/plain; version=0.0.4');
+    return [
+      '# HELP enclave_requests_total Total HTTP requests handled by Enclave',
+      '# TYPE enclave_requests_total counter',
+      `enclave_requests_total ${metrics.totalRequests}`,
+      '# HELP enclave_crypto_operations_total Cryptographic operations count',
+      '# TYPE enclave_crypto_operations_total counter',
+      `enclave_crypto_operations_total{operation="encrypt"} ${metrics.encryptOps}`,
+      `enclave_crypto_operations_total{operation="decrypt"} ${metrics.decryptOps}`,
+      `enclave_crypto_operations_total{operation="rotate"} ${metrics.rotateOps}`,
+      `enclave_crypto_operations_total{operation="generate"} ${metrics.generateOps}`,
+      '# HELP enclave_unsealed_status Unseal status of master key',
+      '# TYPE enclave_unsealed_status gauge',
+      `enclave_unsealed_status ${keyManager.isUnsealed() ? 1 : 0}`,
+    ].join('\n');
+  });
+
   // Generate a new DEK
   fastify.post<{ Body: { alias: string } }>(
     '/api/v1/keys/generate',
@@ -63,6 +108,7 @@ export function registerEnclaveRoutes(
       },
     },
     async (request, reply) => {
+      metrics.generateOps++;
       const identity = (request as any).identity;
       const { alias } = request.body;
 
@@ -90,7 +136,6 @@ export function registerEnclaveRoutes(
       const id = crypto.randomUUID();
       const record = await storage.saveKey(id, alias, identity.serviceId, encryptedDek);
 
-      // Scrub raw DEK from server memory immediately
       CryptoEngine.zeroBuffer(rawDek);
 
       await storage.logAudit({
@@ -110,7 +155,72 @@ export function registerEnclaveRoutes(
     }
   );
 
-  // Encrypt payload via Enclave server
+  // Key Rotation endpoint
+  fastify.post<{ Body: { keyAlias: string } }>(
+    '/api/v1/keys/rotate',
+    {
+      schema: {
+        body: {
+          type: 'object',
+          required: ['keyAlias'],
+          properties: {
+            keyAlias: { type: 'string' },
+          },
+        },
+      },
+    },
+    async (request, reply) => {
+      metrics.rotateOps++;
+      const identity = (request as any).identity;
+      const { keyAlias } = request.body;
+
+      if (!iam.authorize(identity, keyAlias, 'RotateKey')) {
+        await storage.logAudit({
+          serviceId: identity.serviceId,
+          action: 'RotateKey',
+          status: 'DENIED',
+          ipAddress: request.ip,
+        });
+        reply.code(403).send({ error: 'Forbidden', message: `Unauthorized to rotate key ${keyAlias}` });
+        return;
+      }
+
+      const existing = await storage.getKeyByAlias(keyAlias);
+      if (!existing || existing.state !== 'ENABLED') {
+        reply.code(404).send({ error: 'Not Found', message: `Active key not found for alias ${keyAlias}` });
+        return;
+      }
+
+      const newRawDek = CryptoEngine.generateDEK();
+      const masterKey = keyManager.getMasterKey();
+      const newEncryptedDek = CryptoEngine.encryptWithMasterKey(newRawDek, masterKey);
+
+      const updatedRecord = await storage.updateKey(
+        existing.id,
+        newEncryptedDek,
+        existing.version + 1
+      );
+
+      CryptoEngine.zeroBuffer(newRawDek);
+
+      await storage.logAudit({
+        serviceId: identity.serviceId,
+        action: 'RotateKey',
+        keyId: existing.id,
+        status: 'SUCCESS',
+        ipAddress: request.ip,
+      });
+
+      return {
+        id: updatedRecord.id,
+        alias: updatedRecord.alias,
+        version: updatedRecord.version,
+        updatedAt: updatedRecord.updatedAt,
+      };
+    }
+  );
+
+  // Encrypt payload
   fastify.post<{ Body: { keyAlias: string; plaintext: string } }>(
     '/api/v1/crypto/encrypt',
     {
@@ -126,6 +236,7 @@ export function registerEnclaveRoutes(
       },
     },
     async (request, reply) => {
+      metrics.encryptOps++;
       const identity = (request as any).identity;
       const { keyAlias, plaintext } = request.body;
 
@@ -151,7 +262,6 @@ export function registerEnclaveRoutes(
       const plaintextBuf = Buffer.from(plaintext, 'utf-8');
       const encryptedPayload = CryptoEngine.encryptPayload(plaintextBuf, rawDek);
 
-      // Scrub raw DEK
       CryptoEngine.zeroBuffer(rawDek);
 
       return {
@@ -163,7 +273,7 @@ export function registerEnclaveRoutes(
     }
   );
 
-  // Decrypt payload via Enclave server
+  // Decrypt payload
   fastify.post<{ Body: { keyAlias: string; ciphertextHex: string; ivHex: string; authTagHex: string } }>(
     '/api/v1/crypto/decrypt',
     {
@@ -181,6 +291,7 @@ export function registerEnclaveRoutes(
       },
     },
     async (request, reply) => {
+      metrics.decryptOps++;
       const identity = (request as any).identity;
       const { keyAlias, ciphertextHex, ivHex, authTagHex } = request.body;
 
@@ -210,7 +321,6 @@ export function registerEnclaveRoutes(
         rawDek
       );
 
-      // Scrub raw DEK
       CryptoEngine.zeroBuffer(rawDek);
 
       return {
@@ -219,7 +329,7 @@ export function registerEnclaveRoutes(
     }
   );
 
-  // Fetch raw DEK (for client SDK local envelope caching)
+  // Fetch raw DEK
   fastify.post<{ Body: { keyAlias: string } }>(
     '/api/v1/keys/fetch',
     {

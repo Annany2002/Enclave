@@ -19,6 +19,7 @@ describe('Enclave End-to-End Integration Tests', () => {
     iamManager.registerService({
       serviceId,
       token: serviceToken,
+      clientCertCn: 'payment-service.internal',
       allowedKeyAliases: ['payment-card-key'],
       allowedOperations: ['*'],
     });
@@ -90,5 +91,40 @@ describe('Enclave End-to-End Integration Tests', () => {
     await assert.rejects(async () => {
       await unauthorizedClient.generateKey('unauthorized-alias');
     }, /403/);
+  });
+
+  test('Server supports key rotation and exposes prometheus metrics', async () => {
+    const resMetrics = await fetch(`${serverUrl}/metrics`);
+    assert.strictEqual(resMetrics.status, 200);
+    const metricsText = await resMetrics.text();
+    assert.strictEqual(metricsText.includes('enclave_requests_total'), true);
+
+    const resRotate = await fetch(`${serverUrl}/api/v1/keys/rotate`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${serviceToken}`,
+      },
+      body: JSON.stringify({ keyAlias: 'payment-card-key' }),
+    });
+
+    assert.strictEqual(resRotate.status, 200);
+    const rotateData: any = await resRotate.json();
+    assert.strictEqual(rotateData.version, 2);
+  });
+
+  test('Server authenticates caller via mTLS client certificate header', async () => {
+    const resMtls = await fetch(`${serverUrl}/api/v1/crypto/encrypt`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-client-cert-cn': 'payment-service.internal',
+      },
+      body: JSON.stringify({ keyAlias: 'payment-card-key', plaintext: 'mTLS Payload' }),
+    });
+
+    assert.strictEqual(resMtls.status, 200);
+    const encryptedData: any = await resMtls.json();
+    assert.strictEqual(typeof encryptedData.ciphertextHex, 'string');
   });
 });

@@ -4,7 +4,8 @@ export type EnclaveOperation = 'Encrypt' | 'Decrypt' | 'GenerateKey' | 'RotateKe
 
 export interface ServiceIdentity {
   serviceId: string;
-  token: string;
+  token?: string;
+  clientCertCn?: string;
   allowedKeyAliases: string[];
   allowedOperations: EnclaveOperation[];
 }
@@ -34,11 +35,23 @@ export class IAMManager {
     this.serviceRegistry.set(identity.serviceId, identity);
   }
 
-  public authenticate(token: string): ServiceIdentity | null {
+  public authenticateToken(token: string): ServiceIdentity | null {
     if (!token) return null;
 
     for (const identity of this.serviceRegistry.values()) {
-      if (CryptoEngine.timingSafeCompare(identity.token, token)) {
+      if (identity.token && CryptoEngine.timingSafeCompare(identity.token, token)) {
+        return identity;
+      }
+    }
+
+    return null;
+  }
+
+  public authenticateMtlsCert(clientCn: string): ServiceIdentity | null {
+    if (!clientCn) return null;
+
+    for (const identity of this.serviceRegistry.values()) {
+      if (identity.clientCertCn && CryptoEngine.timingSafeCompare(identity.clientCertCn, clientCn)) {
         return identity;
       }
     }
