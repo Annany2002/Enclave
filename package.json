@@ -1,0 +1,14 @@
+{
+  "name": "enclave",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "build": "node node_modules/typescript/bin/tsc -b packages/enclave-server/tsconfig.json packages/enclave-client-sdk/tsconfig.json",
+    "test": "node node_modules/typescript/bin/tsc -b packages/enclave-server/tsconfig.json packages/enclave-client-sdk/tsconfig.json && node --test packages/enclave-server/dist/crypto/crypto-engine.test.js packages/enclave-client-sdk/dist/client.test.js",
+    "lint": "node node_modules/typescript/bin/tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "typescript": "^5.3.3"
+  }
+}
