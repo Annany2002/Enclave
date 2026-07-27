@@ -1,0 +1,44 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum KeyState {
+  ENABLED
+  DISABLED
+  REVOKED
+}
+
+model KeyMeta {
+  id                   String   @id @default(uuid())
+  alias                String   @unique
+  serviceOwner         String   @map("service_owner")
+  encryptedKeyMaterial Bytes    @map("encrypted_key_material")
+  iv                   Bytes
+  authTag              Bytes    @map("auth_tag")
+  version              Int      @default(1)
+  state                KeyState @default(ENABLED)
+  createdAt            DateTime @default(now()) @map("created_at")
+  updatedAt            DateTime @updatedAt @map("updated_at")
+
+  @@index([serviceOwner])
+  @@map("key_meta")
+}
+
+model AuditLog {
+  id        String   @id @default(uuid())
+  timestamp DateTime @default(now())
+  serviceId String   @map("service_id")
+  action    String
+  keyId     String?  @map("key_id")
+  status    String
+  ipAddress String?  @map("ip_address")
+
+  @@index([serviceId])
+  @@index([keyId])
+  @@map("audit_logs")
+}
