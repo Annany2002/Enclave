@@ -1,0 +1,44 @@
+version: '3.8'
+
+services:
+  enclave-postgres:
+    image: postgres:16-alpine
+    container_name: enclave-postgres
+    environment:
+      POSTGRES_USER: enclave_user
+      POSTGRES_PASSWORD: enclave_secure_password
+      POSTGRES_DB: enclave_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U enclave_user -d enclave_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  enclave-server:
+    build:
+      context: .
+      dockerfile: packages/enclave-server/Dockerfile
+    container_name: enclave-server
+    ports:
+      - "3000:3000"
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      DATABASE_URL: "postgresql://enclave_user:enclave_secure_password@enclave-postgres:5432/enclave_db?schema=public"
+      ENCLAVE_MASTER_KEY: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+      ENCLAVE_RBAC_POLICIES: '[{"serviceId":"auth-service","token":"auth-secret-token","allowedKeyAliases":["user-pii-key"],"allowedOperations":["*"]}]'
+    depends_on:
+      enclave-postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3000/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+volumes:
+  pgdata:
