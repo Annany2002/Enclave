@@ -9,20 +9,26 @@ process.env.NODE_ENV = 'test';
 import { createEnclaveServer } from './server.js';
 import { ShamirUnsealEngine } from './crypto/shamir-unseal.js';
 import { WebhookDispatcher } from './webhooks/webhook-dispatcher.js';
+import { KeyRotatorWorker } from './crypto/key-rotator-worker.js';
 
 describe('Enclave Server Integration Tests', () => {
   let fastifyInstance: any;
   let serverUrl: string;
+  let storageRef: any;
+  let keyManagerRef: any;
   const serviceToken = 'test-microservice-token-123';
   const serviceId = 'payment-service';
 
   before(async () => {
-    const { fastify, iamManager } = await createEnclaveServer();
+    const { fastify, iamManager, storageAdapter, masterKeyManager } = await createEnclaveServer();
+    storageRef = storageAdapter;
+    keyManagerRef = masterKeyManager;
+
     iamManager.registerService({
       serviceId,
       token: serviceToken,
       clientCertCn: 'payment-service.internal',
-      allowedKeyAliases: ['payment-card-key', 'revocable-key'],
+      allowedKeyAliases: ['payment-card-key', 'revocable-key', 'old-expired-key'],
       allowedOperations: ['*'],
     });
 
@@ -50,6 +56,31 @@ describe('Enclave Server Integration Tests', () => {
     const signature = dispatcher.computeSignature(jsonPayload, secret);
     assert.strictEqual(signature.startsWith('sha256='), true);
     assert.strictEqual(signature.length, 7 + 64);
+  });
+
+  test('KeyRotatorWorker identifies and auto-rotates expired DEKs', async () => {
+    const keyAlias = 'old-expired-key';
+    const genRes = await fetch(`${serverUrl}/api/v1/keys/generate`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${serviceToken}`,
+      },
+      body: JSON.stringify({ alias: keyAlias }),
+    });
+
+    assert.strictEqual(genRes.status, 200);
+    const keyRecord = await storageRef.getKeyByAlias(keyAlias);
+    assert.ok(keyRecord);
+
+    keyRecord.updatedAt = new Date(Date.now() - 95 * 24 * 60 * 60 * 1000);
+
+    const worker = new KeyRotatorWorker(storageRef, keyManagerRef);
+    const rotatedCount = await worker.performRotationCheck();
+    assert.strictEqual(rotatedCount, 1);
+
+    const updatedRecord = await storageRef.getKeyByAlias(keyAlias);
+    assert.strictEqual(updatedRecord.version, 2);
   });
 
   test('Shamir Secret Sharing splits and reconstructs Master Key correctly', () => {
