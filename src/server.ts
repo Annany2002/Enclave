@@ -58,12 +58,11 @@ if (isMain && process.env.NODE_ENV !== 'test') {
 
   createEnclaveServer()
     .then(({ fastify }) => {
-      fastify.listen({ port, host }, (err, address) => {
+      fastify.listen({ port, host }, (err) => {
         if (err) {
           fastify.log.error(err);
           process.exit(1);
         }
-        fastify.log.info(`Enclave Server running at ${address}`);
       });
     })
     .catch((err) => {
