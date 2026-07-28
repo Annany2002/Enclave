@@ -1,4 +1,8 @@
-# Enclave Server
+<p align="center">
+  <img src="assets/logo.png" alt="Enclave KMS Logo" width="220" />
+</p>
+
+# Enclave
 
 High-performance, production-grade Key Management System (KMS) & Secret Enclave microservice built with Fastify, TypeScript, PostgreSQL, and Node.js native `crypto`.
 
