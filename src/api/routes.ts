@@ -23,13 +23,18 @@ const metrics: MetricsState = {
   revokeOps: 0,
 };
 
+/**
+ * Registers all HTTP API endpoints, authentication hooks, and metrics probes on Fastify instance.
+ */
 export function registerEnclaveRoutes(
   fastify: FastifyInstance,
   keyManager: MasterKeyManager,
   storage: IStorageAdapter,
   iam: IAMManager
 ): void {
-  // Authentication middleware
+  /**
+   * Request authentication middleware hook for Bearer tokens and mTLS client certificates.
+   */
   fastify.addHook('onRequest', async (request: FastifyRequest, reply: FastifyReply) => {
     metrics.totalRequests++;
 
@@ -60,12 +65,16 @@ export function registerEnclaveRoutes(
     (request as any).identity = identity;
   });
 
-  // Health probe
+  /**
+   * GET /healthz - Liveness probe checking Master Key unseal status.
+   */
   fastify.get('/healthz', async () => {
     return { status: 'ok', unsealed: keyManager.isUnsealed() };
   });
 
-  // Readiness probe
+  /**
+   * GET /readyz - Kubernetes readiness probe.
+   */
   fastify.get('/readyz', async (request, reply) => {
     if (!keyManager.isUnsealed()) {
       reply.code(503).send({ status: 'unhealthy', reason: 'Master key not unsealed' });
@@ -74,7 +83,9 @@ export function registerEnclaveRoutes(
     return { status: 'ready' };
   });
 
-  // Prometheus Metrics endpoint
+  /**
+   * GET /metrics - Prometheus metrics scrape endpoint.
+   */
   fastify.get('/metrics', async (request, reply) => {
     reply.header('Content-Type', 'text/plain; version=0.0.4');
     return [
@@ -94,7 +105,9 @@ export function registerEnclaveRoutes(
     ].join('\n');
   });
 
-  // Export Audit Logs
+  /**
+   * GET /api/v1/audit/export - Exports structured JSON audit log trail.
+   */
   fastify.get('/api/v1/audit/export', async (request, reply) => {
     const identity = (request as any).identity;
     if (!iam.authorize(identity, '*', 'ExportAudit')) {
@@ -106,7 +119,9 @@ export function registerEnclaveRoutes(
     return { logs };
   });
 
-  // Generate a new DEK
+  /**
+   * POST /api/v1/keys/generate - Generates a new 256-bit DEK wrapped via Master KEK.
+   */
   fastify.post<{ Body: { alias: string } }>(
     '/api/v1/keys/generate',
     {
@@ -168,7 +183,9 @@ export function registerEnclaveRoutes(
     }
   );
 
-  // Key Rotation endpoint
+  /**
+   * POST /api/v1/keys/rotate - Generates a new DEK version for an existing key alias.
+   */
   fastify.post<{ Body: { keyAlias: string } }>(
     '/api/v1/keys/rotate',
     {
@@ -233,7 +250,9 @@ export function registerEnclaveRoutes(
     }
   );
 
-  // Key Revocation endpoint
+  /**
+   * POST /api/v1/keys/revoke - Revokes a key alias and blocks subsequent access.
+   */
   fastify.post<{ Body: { keyAlias: string } }>(
     '/api/v1/keys/revoke',
     {
@@ -288,7 +307,9 @@ export function registerEnclaveRoutes(
     }
   );
 
-  // Encrypt payload
+  /**
+   * POST /api/v1/crypto/encrypt - Encrypts plaintext payload via AES-256-GCM.
+   */
   fastify.post<{ Body: { keyAlias: string; plaintext: string } }>(
     '/api/v1/crypto/encrypt',
     {
@@ -341,7 +362,9 @@ export function registerEnclaveRoutes(
     }
   );
 
-  // Decrypt payload
+  /**
+   * POST /api/v1/crypto/decrypt - Decrypts ciphertext payload via AES-256-GCM.
+   */
   fastify.post<{ Body: { keyAlias: string; ciphertextHex: string; ivHex: string; authTagHex: string } }>(
     '/api/v1/crypto/decrypt',
     {
@@ -397,7 +420,9 @@ export function registerEnclaveRoutes(
     }
   );
 
-  // Fetch raw DEK
+  /**
+   * POST /api/v1/keys/fetch - Returns unwrapped DEK for client SDK caching.
+   */
   fastify.post<{ Body: { keyAlias: string } }>(
     '/api/v1/keys/fetch',
     {

@@ -3,6 +3,13 @@ dist/
 .DS_Store
 *.log
 *.tsbuildinfo
-packages/*/src/**/*.js
-packages/*/src/**/*.js.map
-packages/*/src/**/*.d.ts
+src/**/*.js
+src/**/*.js.map
+src/**/*.d.ts
+
+# Environment files
+.env
+.env.local
+.env.production
+.env.staging
+!.env.example

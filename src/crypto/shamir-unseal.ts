@@ -5,7 +5,13 @@ export interface SecretShare {
   shareHex: string;
 }
 
+/**
+ * Multi-operator secret sharing engine for splitting and unsealing the Master Key.
+ */
 export class ShamirUnsealEngine {
+  /**
+   * Splits a 256-bit Master Key into N random secret shares.
+   */
   public static splitMasterKey(masterKeyHex: string, totalShares: number = 3): SecretShare[] {
     const keyBuffer = Buffer.from(masterKeyHex, 'hex');
     if (keyBuffer.length !== 32) {
@@ -13,7 +19,7 @@ export class ShamirUnsealEngine {
     }
 
     const shares: SecretShare[] = [];
-    let accumXor = Buffer.alloc(32);
+    const accumXor = Buffer.alloc(32);
 
     for (let i = 1; i < totalShares; i++) {
       const randomShare = crypto.randomBytes(32);
@@ -32,6 +38,9 @@ export class ShamirUnsealEngine {
     return shares;
   }
 
+  /**
+   * Reconstructs the 256-bit Master Key from N secret shares.
+   */
   public static combineShares(shares: SecretShare[]): string {
     if (shares.length === 0) {
       throw new Error('No secret shares provided.');

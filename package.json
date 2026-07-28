@@ -2,13 +2,21 @@
   "name": "enclave",
   "version": "1.0.0",
   "private": true,
+  "type": "module",
+  "main": "dist/server.js",
   "scripts": {
-    "build": "node node_modules/typescript/bin/tsc -b packages/enclave-server/tsconfig.json packages/enclave-client-sdk/tsconfig.json",
-    "test": "node node_modules/typescript/bin/tsc -b packages/enclave-server/tsconfig.json packages/enclave-client-sdk/tsconfig.json && node --test packages/enclave-server/dist/crypto/crypto-engine.test.js packages/enclave-client-sdk/dist/client.test.js",
-    "lint": "node node_modules/typescript/bin/tsc --noEmit"
+    "build": "tsc",
+    "start": "node dist/server.js",
+    "dev": "node src/server.ts",
+    "test": "tsc && node --test dist/crypto/crypto-engine.test.js dist/server.test.js"
+  },
+  "dependencies": {
+    "@prisma/client": "^5.10.2",
+    "fastify": "^4.26.1"
   },
   "devDependencies": {
     "@types/node": "^20.11.0",
+    "prisma": "^5.10.2",
     "typescript": "^5.3.3"
   }
 }

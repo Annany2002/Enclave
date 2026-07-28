@@ -21,7 +21,7 @@ services:
   enclave-server:
     build:
       context: .
-      dockerfile: packages/enclave-server/Dockerfile
+      dockerfile: Dockerfile
     container_name: enclave-server
     ports:
       - "3000:3000"
@@ -30,7 +30,7 @@ services:
       PORT: 3000
       DATABASE_URL: "postgresql://enclave_user:enclave_secure_password@enclave-postgres:5432/enclave_db?schema=public"
       ENCLAVE_MASTER_KEY: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-      ENCLAVE_RBAC_POLICIES: '[{"serviceId":"auth-service","token":"auth-secret-token","allowedKeyAliases":["user-pii-key"],"allowedOperations":["*"]}]'
+      ENCLAVE_RBAC_POLICIES: '[{"serviceId":"billing-service","token":"billing-secret-token","allowedKeyAliases":["*"],"allowedOperations":["*"]}]'
     depends_on:
       enclave-postgres:
         condition: service_healthy

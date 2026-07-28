@@ -5,6 +5,9 @@ import { InMemoryStorageAdapter } from './storage/storage-adapter.js';
 import { IAMManager } from './auth/iam.js';
 import { registerEnclaveRoutes } from './api/routes.js';
 
+/**
+ * Bootstraps the Enclave Fastify server instance with MasterKeyManager, StorageAdapter, and IAMManager.
+ */
 export async function createEnclaveServer() {
   const fastify = Fastify({
     logger: {
