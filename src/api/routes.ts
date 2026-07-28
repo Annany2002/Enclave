@@ -4,6 +4,7 @@ import { MasterKeyManager } from '../crypto/master-key.js';
 import { CryptoEngine } from '../crypto/crypto-engine.js';
 import { IStorageAdapter } from '../storage/storage-adapter.js';
 import { IAMManager } from '../auth/iam.js';
+import { WebhookDispatcher } from '../webhooks/webhook-dispatcher.js';
 
 interface MetricsState {
   totalRequests: number;
@@ -24,13 +25,14 @@ const metrics: MetricsState = {
 };
 
 /**
- * Registers all HTTP API endpoints, authentication hooks, and metrics probes on Fastify instance.
+ * Registers all HTTP API endpoints, OpenAPI schemas, authentication hooks, and metrics probes on Fastify instance.
  */
 export function registerEnclaveRoutes(
   fastify: FastifyInstance,
   keyManager: MasterKeyManager,
   storage: IStorageAdapter,
-  iam: IAMManager
+  iam: IAMManager,
+  webhooks?: WebhookDispatcher
 ): void {
   /**
    * Request authentication middleware hook for Bearer tokens and mTLS client certificates.
@@ -38,7 +40,12 @@ export function registerEnclaveRoutes(
   fastify.addHook('onRequest', async (request: FastifyRequest, reply: FastifyReply) => {
     metrics.totalRequests++;
 
-    if (request.url === '/healthz' || request.url === '/readyz' || request.url === '/metrics') {
+    if (
+      request.url === '/healthz' ||
+      request.url === '/readyz' ||
+      request.url === '/metrics' ||
+      request.url.startsWith('/docs')
+    ) {
       return;
     }
 
@@ -58,6 +65,14 @@ export function registerEnclaveRoutes(
     }
 
     if (!identity) {
+      if (webhooks) {
+        webhooks.dispatch({
+          event: 'AccessDenied',
+          timestamp: new Date().toISOString(),
+          status: 'DENIED',
+          ipAddress: request.ip,
+        });
+      }
       reply.code(403).send({ error: 'Forbidden', message: 'Invalid or missing authentication credentials' });
       return;
     }
@@ -68,69 +83,175 @@ export function registerEnclaveRoutes(
   /**
    * GET /healthz - Liveness probe checking Master Key unseal status.
    */
-  fastify.get('/healthz', async () => {
-    return { status: 'ok', unsealed: keyManager.isUnsealed() };
-  });
+  fastify.get(
+    '/healthz',
+    {
+      schema: {
+        summary: 'Liveness Probe',
+        tags: ['System Probes'],
+        response: {
+          200: {
+            type: 'object',
+            properties: {
+              status: { type: 'string' },
+              unsealed: { type: 'boolean' },
+            },
+          },
+        },
+      },
+    },
+    async () => {
+      return { status: 'ok', unsealed: keyManager.isUnsealed() };
+    }
+  );
 
   /**
    * GET /readyz - Kubernetes readiness probe.
    */
-  fastify.get('/readyz', async (_request, reply) => {
-    if (!keyManager.isUnsealed()) {
-      reply.code(503).send({ status: 'unhealthy', reason: 'Master key not unsealed' });
-      return;
+  fastify.get(
+    '/readyz',
+    {
+      schema: {
+        summary: 'Readiness Probe',
+        tags: ['System Probes'],
+        response: {
+          200: {
+            type: 'object',
+            properties: {
+              status: { type: 'string' },
+            },
+          },
+          503: {
+            type: 'object',
+            properties: {
+              status: { type: 'string' },
+              reason: { type: 'string' },
+            },
+          },
+        },
+      },
+    },
+    async (_request, reply) => {
+      if (!keyManager.isUnsealed()) {
+        reply.code(503).send({ status: 'unhealthy', reason: 'Master key not unsealed' });
+        return;
+      }
+      return { status: 'ready' };
     }
-    return { status: 'ready' };
-  });
+  );
 
   /**
    * GET /metrics - Prometheus metrics scrape endpoint.
    */
-  fastify.get('/metrics', async (_request, reply) => {
-    reply.header('Content-Type', 'text/plain; version=0.0.4');
-    return [
-      '# HELP enclave_requests_total Total HTTP requests handled by Enclave',
-      '# TYPE enclave_requests_total counter',
-      `enclave_requests_total ${metrics.totalRequests}`,
-      '# HELP enclave_crypto_operations_total Cryptographic operations count',
-      '# TYPE enclave_crypto_operations_total counter',
-      `enclave_crypto_operations_total{operation="encrypt"} ${metrics.encryptOps}`,
-      `enclave_crypto_operations_total{operation="decrypt"} ${metrics.decryptOps}`,
-      `enclave_crypto_operations_total{operation="rotate"} ${metrics.rotateOps}`,
-      `enclave_crypto_operations_total{operation="generate"} ${metrics.generateOps}`,
-      `enclave_crypto_operations_total{operation="revoke"} ${metrics.revokeOps}`,
-      '# HELP enclave_unsealed_status Unseal status of master key',
-      '# TYPE enclave_unsealed_status gauge',
-      `enclave_unsealed_status ${keyManager.isUnsealed() ? 1 : 0}`,
-    ].join('\n');
-  });
+  fastify.get(
+    '/metrics',
+    {
+      schema: {
+        summary: 'Prometheus Metrics',
+        tags: ['System Probes'],
+      },
+    },
+    async (_request, reply) => {
+      reply.header('Content-Type', 'text/plain; version=0.0.4');
+      return [
+        '# HELP enclave_requests_total Total HTTP requests handled by Enclave',
+        '# TYPE enclave_requests_total counter',
+        `enclave_requests_total ${metrics.totalRequests}`,
+        '# HELP enclave_crypto_operations_total Cryptographic operations count',
+        '# TYPE enclave_crypto_operations_total counter',
+        `enclave_crypto_operations_total{operation="encrypt"} ${metrics.encryptOps}`,
+        `enclave_crypto_operations_total{operation="decrypt"} ${metrics.decryptOps}`,
+        `enclave_crypto_operations_total{operation="rotate"} ${metrics.rotateOps}`,
+        `enclave_crypto_operations_total{operation="generate"} ${metrics.generateOps}`,
+        `enclave_crypto_operations_total{operation="revoke"} ${metrics.revokeOps}`,
+        '# HELP enclave_unsealed_status Unseal status of master key',
+        '# TYPE enclave_unsealed_status gauge',
+        `enclave_unsealed_status ${keyManager.isUnsealed() ? 1 : 0}`,
+      ].join('\n');
+    }
+  );
 
   /**
    * GET /api/v1/audit/export - Exports structured JSON audit log trail.
    */
-  fastify.get('/api/v1/audit/export', async (request, reply) => {
-    const identity = (request as any).identity;
-    if (!iam.authorize(identity, '*', 'ExportAudit')) {
-      reply.code(403).send({ error: 'Forbidden', message: 'Unauthorized to export audit logs' });
-      return;
-    }
+  fastify.get(
+    '/api/v1/audit/export',
+    {
+      schema: {
+        summary: 'Export Security Audit Logs',
+        tags: ['Audit & Compliance'],
+        response: {
+          200: {
+            type: 'object',
+            properties: {
+              logs: {
+                type: 'array',
+                items: {
+                  type: 'object',
+                  properties: {
+                    id: { type: 'string' },
+                    timestamp: { type: 'string' },
+                    serviceId: { type: 'string' },
+                    action: { type: 'string' },
+                    keyId: { type: 'string' },
+                    status: { type: 'string' },
+                    ipAddress: { type: 'string' },
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+    },
+    async (request, reply) => {
+      const identity = (request as any).identity;
+      if (!iam.authorize(identity, '*', 'ExportAudit')) {
+        if (webhooks) {
+          webhooks.dispatch({
+            event: 'ExportAudit',
+            timestamp: new Date().toISOString(),
+            serviceId: identity.serviceId,
+            status: 'DENIED',
+            ipAddress: request.ip,
+          });
+        }
+        reply.code(403).send({ error: 'Forbidden', message: 'Unauthorized to export audit logs' });
+        return;
+      }
 
-    const logs = await storage.exportAuditLogs();
-    return { logs };
-  });
+      const logs = await storage.exportAuditLogs();
+      return { logs };
+    }
+  );
 
   /**
    * POST /api/v1/keys/generate - Generates a new 256-bit DEK wrapped via Master KEK.
+   * 
+   * @remark **Generated Key Record ID Prefix**: `enc_key_` (e.g. `enc_key_5a791bcf-02b7-4ea1-9caf-e5c48acf63f0`)
    */
   fastify.post<{ Body: { alias: string } }>(
     '/api/v1/keys/generate',
     {
       schema: {
+        summary: 'Generate New DEK',
+        tags: ['Key Lifecycle Management'],
         body: {
           type: 'object',
           required: ['alias'],
           properties: {
             alias: { type: 'string', minLength: 3, maxLength: 64 },
+          },
+        },
+        response: {
+          200: {
+            type: 'object',
+            properties: {
+              id: { type: 'string' },
+              alias: { type: 'string' },
+              version: { type: 'number' },
+              createdAt: { type: 'string' },
+            },
           },
         },
       },
@@ -147,6 +268,18 @@ export function registerEnclaveRoutes(
           status: 'DENIED',
           ipAddress: request.ip,
         });
+
+        if (webhooks) {
+          webhooks.dispatch({
+            event: 'GenerateKey',
+            timestamp: new Date().toISOString(),
+            serviceId: identity.serviceId,
+            keyAlias: alias,
+            status: 'DENIED',
+            ipAddress: request.ip,
+          });
+        }
+
         reply.code(403).send({ error: 'Forbidden', message: `Unauthorized to generate key for alias ${alias}` });
         return;
       }
@@ -161,7 +294,7 @@ export function registerEnclaveRoutes(
       const masterKey = keyManager.getMasterKey();
       const encryptedDek = CryptoEngine.encryptWithMasterKey(rawDek, masterKey);
 
-      const id = crypto.randomUUID();
+      const id = `enc_key_${crypto.randomUUID()}`;
       const record = await storage.saveKey(id, alias, identity.serviceId, encryptedDek);
 
       CryptoEngine.zeroBuffer(rawDek);
@@ -173,6 +306,17 @@ export function registerEnclaveRoutes(
         status: 'SUCCESS',
         ipAddress: request.ip,
       });
+
+      if (webhooks) {
+        webhooks.dispatch({
+          event: 'GenerateKey',
+          timestamp: new Date().toISOString(),
+          serviceId: identity.serviceId,
+          keyAlias: alias,
+          status: 'SUCCESS',
+          ipAddress: request.ip,
+        });
+      }
 
       return {
         id: record.id,
@@ -190,11 +334,24 @@ export function registerEnclaveRoutes(
     '/api/v1/keys/rotate',
     {
       schema: {
+        summary: 'Rotate Key Version',
+        tags: ['Key Lifecycle Management'],
         body: {
           type: 'object',
           required: ['keyAlias'],
           properties: {
             keyAlias: { type: 'string' },
+          },
+        },
+        response: {
+          200: {
+            type: 'object',
+            properties: {
+              id: { type: 'string' },
+              alias: { type: 'string' },
+              version: { type: 'number' },
+              updatedAt: { type: 'string' },
+            },
           },
         },
       },
@@ -211,6 +368,18 @@ export function registerEnclaveRoutes(
           status: 'DENIED',
           ipAddress: request.ip,
         });
+
+        if (webhooks) {
+          webhooks.dispatch({
+            event: 'RotateKey',
+            timestamp: new Date().toISOString(),
+            serviceId: identity.serviceId,
+            keyAlias,
+            status: 'DENIED',
+            ipAddress: request.ip,
+          });
+        }
+
         reply.code(403).send({ error: 'Forbidden', message: `Unauthorized to rotate key ${keyAlias}` });
         return;
       }
@@ -241,6 +410,17 @@ export function registerEnclaveRoutes(
         ipAddress: request.ip,
       });
 
+      if (webhooks) {
+        webhooks.dispatch({
+          event: 'RotateKey',
+          timestamp: new Date().toISOString(),
+          serviceId: identity.serviceId,
+          keyAlias,
+          status: 'SUCCESS',
+          ipAddress: request.ip,
+        });
+      }
+
       return {
         id: updatedRecord.id,
         alias: updatedRecord.alias,
@@ -257,11 +437,24 @@ export function registerEnclaveRoutes(
     '/api/v1/keys/revoke',
     {
       schema: {
+        summary: 'Revoke Key Alias',
+        tags: ['Key Lifecycle Management'],
         body: {
           type: 'object',
           required: ['keyAlias'],
           properties: {
             keyAlias: { type: 'string' },
+          },
+        },
+        response: {
+          200: {
+            type: 'object',
+            properties: {
+              id: { type: 'string' },
+              alias: { type: 'string' },
+              state: { type: 'string' },
+              updatedAt: { type: 'string' },
+            },
           },
         },
       },
@@ -278,6 +471,18 @@ export function registerEnclaveRoutes(
           status: 'DENIED',
           ipAddress: request.ip,
         });
+
+        if (webhooks) {
+          webhooks.dispatch({
+            event: 'RevokeKey',
+            timestamp: new Date().toISOString(),
+            serviceId: identity.serviceId,
+            keyAlias,
+            status: 'DENIED',
+            ipAddress: request.ip,
+          });
+        }
+
         reply.code(403).send({ error: 'Forbidden', message: `Unauthorized to revoke key ${keyAlias}` });
         return;
       }
@@ -298,6 +503,17 @@ export function registerEnclaveRoutes(
         ipAddress: request.ip,
       });
 
+      if (webhooks) {
+        webhooks.dispatch({
+          event: 'RevokeKey',
+          timestamp: new Date().toISOString(),
+          serviceId: identity.serviceId,
+          keyAlias,
+          status: 'SUCCESS',
+          ipAddress: request.ip,
+        });
+      }
+
       return {
         id: revokedRecord.id,
         alias: revokedRecord.alias,
@@ -314,12 +530,25 @@ export function registerEnclaveRoutes(
     '/api/v1/crypto/encrypt',
     {
       schema: {
+        summary: 'Encrypt Payload',
+        tags: ['Cryptographic Operations'],
         body: {
           type: 'object',
           required: ['keyAlias', 'plaintext'],
           properties: {
             keyAlias: { type: 'string' },
             plaintext: { type: 'string' },
+          },
+        },
+        response: {
+          200: {
+            type: 'object',
+            properties: {
+              ciphertextHex: { type: 'string' },
+              ivHex: { type: 'string' },
+              authTagHex: { type: 'string' },
+              keyVersion: { type: 'number' },
+            },
           },
         },
       },
@@ -369,6 +598,8 @@ export function registerEnclaveRoutes(
     '/api/v1/crypto/decrypt',
     {
       schema: {
+        summary: 'Decrypt Payload',
+        tags: ['Cryptographic Operations'],
         body: {
           type: 'object',
           required: ['keyAlias', 'ciphertextHex', 'ivHex', 'authTagHex'],
@@ -377,6 +608,14 @@ export function registerEnclaveRoutes(
             ciphertextHex: { type: 'string' },
             ivHex: { type: 'string' },
             authTagHex: { type: 'string' },
+          },
+        },
+        response: {
+          200: {
+            type: 'object',
+            properties: {
+              plaintext: { type: 'string' },
+            },
           },
         },
       },
@@ -416,56 +655,6 @@ export function registerEnclaveRoutes(
 
       return {
         plaintext: decryptedBuf.toString('utf-8'),
-      };
-    }
-  );
-
-  /**
-   * POST /api/v1/keys/fetch - Returns unwrapped DEK for client SDK caching.
-   */
-  fastify.post<{ Body: { keyAlias: string } }>(
-    '/api/v1/keys/fetch',
-    {
-      schema: {
-        body: {
-          type: 'object',
-          required: ['keyAlias'],
-          properties: {
-            keyAlias: { type: 'string' },
-          },
-        },
-      },
-    },
-    async (request, reply) => {
-      const identity = (request as any).identity;
-      const { keyAlias } = request.body;
-
-      if (!iam.authorize(identity, keyAlias, 'GetKey')) {
-        reply.code(403).send({ error: 'Forbidden', message: `Unauthorized for operation GetKey on key ${keyAlias}` });
-        return;
-      }
-
-      const keyRecord = await storage.getKeyByAlias(keyAlias);
-      if (!keyRecord || keyRecord.state !== 'ENABLED') {
-        reply.code(410).send({ error: 'Gone', message: `Key ${keyAlias} is disabled or revoked` });
-        return;
-      }
-
-      const masterKey = keyManager.getMasterKey();
-      const rawDek = CryptoEngine.decryptWithMasterKey(
-        keyRecord.encryptedKeyMaterial,
-        keyRecord.iv,
-        keyRecord.authTag,
-        masterKey
-      );
-
-      const dekHex = rawDek.toString('hex');
-      CryptoEngine.zeroBuffer(rawDek);
-
-      return {
-        keyAlias: keyRecord.alias,
-        dekHex,
-        version: keyRecord.version,
       };
     }
   );

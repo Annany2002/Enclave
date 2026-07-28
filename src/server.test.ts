@@ -8,6 +8,7 @@ process.env.NODE_ENV = 'test';
 
 import { createEnclaveServer } from './server.js';
 import { ShamirUnsealEngine } from './crypto/shamir-unseal.js';
+import { WebhookDispatcher } from './webhooks/webhook-dispatcher.js';
 
 describe('Enclave Server Integration Tests', () => {
   let fastifyInstance: any;
@@ -34,6 +35,21 @@ describe('Enclave Server Integration Tests', () => {
     if (fastifyInstance) {
       await fastifyInstance.close();
     }
+  });
+
+  test('Swagger UI documentation endpoint is accessible at /docs', async () => {
+    const res = await fetch(`${serverUrl}/docs/static/index.html`);
+    assert.strictEqual(res.status, 200);
+  });
+
+  test('WebhookDispatcher signs payload with HMAC-SHA256 signature', () => {
+    const dispatcher = new WebhookDispatcher();
+    const secret = 'webhook-hmac-secret-key';
+    const jsonPayload = JSON.stringify({ event: 'KeyRevoked', keyAlias: 'test-key' });
+    
+    const signature = dispatcher.computeSignature(jsonPayload, secret);
+    assert.strictEqual(signature.startsWith('sha256='), true);
+    assert.strictEqual(signature.length, 7 + 64);
   });
 
   test('Shamir Secret Sharing splits and reconstructs Master Key correctly', () => {
