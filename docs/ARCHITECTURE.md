@@ -15,7 +15,7 @@ graph TD
         AppB[Auth Microservice]
     end
 
-    subgraph Enclave KMS Microservice (Port 8200)
+    subgraph "Enclave KMS Microservice (Port 8200)"
         API[Fastify API Router / OpenAPI 3.0]
         RateLimiter[Rate Limiter Guard]
         IAM[Zero-Trust IAM & RBAC]
