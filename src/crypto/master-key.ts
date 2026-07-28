@@ -1,5 +1,3 @@
-import crypto from 'node:crypto';
-
 /**
  * Manages the unsealing, validation, and zero-fill destruction of the Master Key (KEK).
  */

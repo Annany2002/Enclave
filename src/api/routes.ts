@@ -75,7 +75,7 @@ export function registerEnclaveRoutes(
   /**
    * GET /readyz - Kubernetes readiness probe.
    */
-  fastify.get('/readyz', async (request, reply) => {
+  fastify.get('/readyz', async (_request, reply) => {
     if (!keyManager.isUnsealed()) {
       reply.code(503).send({ status: 'unhealthy', reason: 'Master key not unsealed' });
       return;
@@ -86,7 +86,7 @@ export function registerEnclaveRoutes(
   /**
    * GET /metrics - Prometheus metrics scrape endpoint.
    */
-  fastify.get('/metrics', async (request, reply) => {
+  fastify.get('/metrics', async (_request, reply) => {
     reply.header('Content-Type', 'text/plain; version=0.0.4');
     return [
       '# HELP enclave_requests_total Total HTTP requests handled by Enclave',
