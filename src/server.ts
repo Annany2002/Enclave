@@ -3,19 +3,23 @@ import { fileURLToPath } from 'node:url';
 import crypto from 'node:crypto';
 import fastifySwagger from '@fastify/swagger';
 import fastifySwaggerUi from '@fastify/swagger-ui';
+import fastifyRateLimit from '@fastify/rate-limit';
 import { MasterKeyManager } from './crypto/master-key.js';
 import { InMemoryStorageAdapter, IStorageAdapter } from './storage/storage-adapter.js';
 import { PrismaStorageAdapter } from './storage/prisma-adapter.js';
 import { IAMManager } from './auth/iam.js';
 import { WebhookDispatcher } from './webhooks/webhook-dispatcher.js';
+import { KeyRotatorWorker } from './crypto/key-rotator-worker.js';
 import { registerEnclaveRoutes } from './api/routes.js';
 
 /**
- * Bootstraps the Enclave Fastify server instance with MasterKeyManager, StorageAdapter, IAMManager, and WebhookDispatcher.
+ * Bootstraps the Enclave Fastify server instance with MasterKeyManager, StorageAdapter, IAMManager, WebhookDispatcher, and KeyRotatorWorker.
  */
 export async function createEnclaveServer() {
   const isProduction = process.env.NODE_ENV === 'production';
   const isTest = process.env.NODE_ENV === 'test';
+
+  const webhookDispatcher = new WebhookDispatcher();
 
   const fastify = Fastify({
     genReqId: (req) => {
@@ -41,6 +45,32 @@ export async function createEnclaveServer() {
             },
           },
         },
+  });
+
+  await fastify.register(fastifyRateLimit, {
+    max: Number(process.env.ENCLAVE_RATE_LIMIT_MAX) || 100,
+    timeWindow: '1 minute',
+    allowList: ['/healthz', '/readyz', '/metrics', '/docs'],
+    keyGenerator: (req) => {
+      const authHeader = req.headers.authorization;
+      if (authHeader && authHeader.startsWith('Bearer ')) {
+        return authHeader.substring(7);
+      }
+      return req.ip;
+    },
+    errorResponseBuilder: (req) => {
+      webhookDispatcher.dispatch({
+        event: 'AccessDenied',
+        timestamp: new Date().toISOString(),
+        status: 'DENIED',
+        ipAddress: req.ip,
+      });
+      return {
+        statusCode: 429,
+        error: 'Too Many Requests',
+        message: 'Rate limit quota exceeded. Please slow down requests.',
+      };
+    },
   });
 
   await fastify.register(fastifySwagger, {
@@ -82,11 +112,19 @@ export async function createEnclaveServer() {
   }
 
   const iamManager = new IAMManager();
-  const webhookDispatcher = new WebhookDispatcher();
+  const keyRotatorWorker = new KeyRotatorWorker(storageAdapter, masterKeyManager, webhookDispatcher);
+
+  if (!isTest) {
+    keyRotatorWorker.start();
+  }
+
+  fastify.addHook('onClose', async () => {
+    keyRotatorWorker.stop();
+  });
 
   registerEnclaveRoutes(fastify, masterKeyManager, storageAdapter, iamManager, webhookDispatcher);
 
-  return { fastify, masterKeyManager, storageAdapter, iamManager, webhookDispatcher };
+  return { fastify, masterKeyManager, storageAdapter, iamManager, webhookDispatcher, keyRotatorWorker };
 }
 
 const currentFile = fileURLToPath(import.meta.url);

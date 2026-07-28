@@ -85,6 +85,22 @@ export class PrismaStorageAdapter implements IStorageAdapter {
     };
   }
 
+  public async listKeys(): Promise<StoredKeyRecord[]> {
+    const records = await this.prisma.keyMeta.findMany();
+    return records.map((record) => ({
+      id: record.id,
+      alias: record.alias,
+      serviceOwner: record.serviceOwner,
+      encryptedKeyMaterial: Buffer.from(record.encryptedKeyMaterial),
+      iv: Buffer.from(record.iv),
+      authTag: Buffer.from(record.authTag),
+      version: record.version,
+      state: record.state as 'ENABLED' | 'DISABLED' | 'REVOKED',
+      createdAt: record.createdAt,
+      updatedAt: record.updatedAt,
+    }));
+  }
+
   public async updateKey(
     id: string,
     encryptedDek: EncryptedDEK,

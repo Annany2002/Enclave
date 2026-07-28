@@ -36,6 +36,7 @@ export interface IStorageAdapter {
   
   getKeyById(id: string): Promise<StoredKeyRecord | null>;
   getKeyByAlias(alias: string): Promise<StoredKeyRecord | null>;
+  listKeys(): Promise<StoredKeyRecord[]>;
   
   updateKey(
     id: string,
@@ -89,6 +90,10 @@ export class InMemoryStorageAdapter implements IStorageAdapter {
     const id = this.aliasIndex.get(alias);
     if (!id) return null;
     return this.getKeyById(id);
+  }
+
+  public async listKeys(): Promise<StoredKeyRecord[]> {
+    return Array.from(this.keys.values());
   }
 
   public async updateKey(
