@@ -16,9 +16,12 @@ graph TD
     end
 
     subgraph Enclave KMS Microservice (Port 8200)
-        API[Fastify API Router]
+        API[Fastify API Router / OpenAPI 3.0]
+        RateLimiter[Rate Limiter Guard]
         IAM[Zero-Trust IAM & RBAC]
         Crypto[AES-256-GCM Crypto Engine]
+        Rotator[Key Rotator Worker]
+        Webhooks[Webhook Dispatcher]
         StorageAdapter[Storage Adapter Interface]
         PrismaAdapter[Prisma PostgreSQL Adapter]
         MemoryAdapter[In-Memory Adapter]
@@ -30,12 +33,15 @@ graph TD
 
     AppA -->|Bearer Token / mTLS| API
     AppB -->|Bearer Token / mTLS| API
-    API --> IAM
+    API --> RateLimiter
+    RateLimiter --> IAM
     IAM -->|Authorize| Crypto
     Crypto --> StorageAdapter
+    Rotator -->|Scan & Rotate| StorageAdapter
     StorageAdapter --> PrismaAdapter
     StorageAdapter --> MemoryAdapter
     PrismaAdapter -->|Encrypted DEK Blobs| DB
+    Crypto -->|Dispatched Events| Webhooks
 ```
 
 ---
@@ -48,6 +54,7 @@ Enclave uses a two-tier envelope encryption model to guarantee high performance 
 
 1. **Master Key (KEK - Key Encryption Key)**:
    - A 256-bit (64 hex characters) root key injected at startup via `ENCLAVE_MASTER_KEY` or unsealed via Shamir Secret Sharing.
+   - Supports domain prefix `enc_kek_` (e.g., `enc_kek_d6e0020a1769bba9...`).
    - Resides exclusively in server memory and is never written to disk or database storage.
 
 2. **Data Encryption Key (DEK)**:
@@ -102,11 +109,24 @@ public static zeroBuffer(buf: Buffer): void {
 
 ---
 
-### 2.4 Shamir Secret Sharing (Multi-Operator Split Unseal)
+### 2.4 Domain Key Prefixing Schema (`enc_`)
+
+Enclave enforces explicit domain key prefixing for secret scanning and resource type identification:
+
+| Resource Type | Domain Prefix | Example Format |
+|---------------|---------------|----------------|
+| **Key Record ID** | `enc_key_` | `enc_key_5a791bcf-02b7-4ea1-9caf-e5c48acf63f0` |
+| **Master KEK** | `enc_kek_` | `enc_kek_d6e0020a1769bba9b76a51ad7e1c8335...` |
+| **Shamir Secret Share** | `enc_shr_` | `enc_shr_1_a7ed9c3442451e876a76d652...` |
+| **Service Bearer Token** | `enc_tok_` | `enc_tok_billing_d45c7666b43677ce041892...` |
+
+---
+
+### 2.5 Shamir Secret Sharing (Multi-Operator Split Unseal)
 
 For high-security deployments where a single operator must not hold the Master KEK:
 
-- **Key Splitting**: The 256-bit Master Key is split into $N$ secret shares using deterministic XOR threshold splitting (`ShamirUnsealEngine.splitMasterKey`).
+- **Key Splitting**: The 256-bit Master Key is split into $N$ secret shares prefixed with `enc_shr_X_` using deterministic XOR threshold splitting (`ShamirUnsealEngine.splitMasterKey`).
 - **Key Reconstruction**: $N$ operators present their individual shares to reconstruct the original Master Key in memory during bootstrap (`ShamirUnsealEngine.combineShares`).
 
 ---
@@ -118,119 +138,91 @@ sequenceDiagram
     autonumber
     actor Microservice as Calling Microservice
     participant API as API Layer (Fastify)
+    participant Rate as Rate Limiter Guard
     participant IAM as IAM / RBAC Engine
     participant Crypto as Crypto Engine
     participant DB as Storage (Prisma PostgreSQL)
+    participant Webhook as Webhook Dispatcher
 
     Microservice->>API: POST /api/v1/crypto/encrypt { keyAlias, plaintext }
-    Note over API: Extracts Authorization header or mTLS cert
-    API->>IAM: authenticateToken(token) / authenticateMtlsCert(cn)
-    alt Invalid Credentials
-        IAM-->>API: Authentication Failed
-        API-->>Microservice: 403 Forbidden
-    else Authenticated Identity
-        IAM->>IAM: authorize(identity, keyAlias, 'Encrypt')
-        alt Unauthorized for Key
-            IAM-->>API: Authorization Denied
+    API->>Rate: Check Rate Quota (100 req/min)
+    alt Rate Limit Exceeded
+        Rate-->>API: Quota Exceeded
+        API->>Webhook: dispatch(AccessDenied)
+        API-->>Microservice: 429 Too Many Requests
+    else Within Quota
+        API->>IAM: authenticateToken(token) / authenticateMtlsCert(cn)
+        alt Invalid Credentials
+            IAM-->>API: Authentication Failed
+            API->>Webhook: dispatch(AccessDenied)
             API-->>Microservice: 403 Forbidden
-        else Authorized
-            API->>DB: getKeyByAlias(keyAlias)
-            DB-->>API: StoredKeyRecord (Encrypted DEK, IV, AuthTag, Version)
-            API->>Crypto: decryptWithMasterKey(EncryptedDEK, MasterKey)
-            Crypto-->>API: Raw DEK Buffer
-            API->>Crypto: encryptPayload(Plaintext, Raw DEK)
-            Crypto-->>API: Ciphertext, IV, AuthTag
-            Note over API: zeroBuffer(Raw DEK)
-            API->>DB: logAudit(serviceId, 'Encrypt', SUCCESS)
-            API-->>Microservice: 200 OK { ciphertextHex, ivHex, authTagHex, keyVersion }
+        else Authenticated Identity
+            IAM->>IAM: authorize(identity, keyAlias, 'Encrypt')
+            alt Unauthorized for Key
+                IAM-->>API: Authorization Denied
+                API->>Webhook: dispatch(AccessDenied)
+                API-->>Microservice: 403 Forbidden
+            else Authorized
+                API->>DB: getKeyByAlias(keyAlias)
+                DB-->>API: StoredKeyRecord (Encrypted DEK, IV, AuthTag, Version)
+                API->>Crypto: decryptWithMasterKey(EncryptedDEK, MasterKey)
+                Crypto-->>API: Raw DEK Buffer
+                API->>Crypto: encryptPayload(Plaintext, Raw DEK)
+                Crypto-->>API: Ciphertext, IV, AuthTag
+                Note over API: zeroBuffer(Raw DEK)
+                API->>DB: logAudit(serviceId, 'Encrypt', SUCCESS)
+                API-->>Microservice: 200 OK { ciphertextHex, ivHex, authTagHex, keyVersion }
+            end
         end
     end
 ```
 
 ---
 
-## 4. Zero-Trust IAM & RBAC Specification
+## 4. Automated Background DEK Rotation Worker
 
-### 4.1 Dual Authentication Drivers
+The `KeyRotatorWorker` background service automatically enforces key expiration compliance:
 
-Enclave supports two identity authentication mechanisms:
-
-1. **Bearer Token Authentication**:
-   - Clients supply pre-shared API keys via `Authorization: Bearer <token>`.
-   - Validated against identity registry using constant-time comparison (`crypto.timingSafeEqual`).
-
-2. **mTLS (Mutual TLS) Certificate Authentication**:
-   - Reverse proxies or ingress controllers forward client certificate Common Name / SAN via `x-client-cert-cn` or `x-forwarded-client-cert` headers.
-   - Validated against `clientCertCn` identity mappings in constant time.
+- **Key Age Evaluation**: Periodically queries storage adapter for active DEK records exceeding `ENCLAVE_KEY_MAX_AGE_DAYS` (default: 90 days).
+- **Automated Re-Wrapping**: Generates a new 256-bit DEK, wraps it with Master KEK, saves version $V+1$ to PostgreSQL, logs audit entry `AutoRotateKey`, and fires `RotateKey` webhook notification.
 
 ---
 
-### 4.2 Fine-Grained RBAC Permission Matrix
+## 5. Real-Time Security Event Webhooks
 
-Every service identity specifies exact key aliases and operation scopes:
+When security events occur (`GenerateKey`, `RotateKey`, `RevokeKey`, `AccessDenied`), `WebhookDispatcher` asynchronously posts JSON payloads to target URLs configured in `ENCLAVE_WEBHOOK_URLS`:
 
 ```json
-[
-  {
-    "serviceId": "billing-service",
-    "token": "billing-secret-token",
-    "clientCertCn": "billing-service.internal",
-    "allowedKeyAliases": ["billing-card-key"],
-    "allowedOperations": ["Encrypt", "Decrypt", "GenerateKey", "RotateKey"]
-  }
-]
-```
-
-- **Operations**: `'Encrypt'`, `'Decrypt'`, `'GenerateKey'`, `'RotateKey'`, `'RevokeKey'`, `'GetKey'`, `'ExportAudit'`, `'*'`.
-- **Key Aliases**: Explicit string array or wildcard `"*"` matching.
-
----
-
-## 5. Storage Layer & Database Schema
-
-Enclave uses Prisma ORM targeting PostgreSQL for persistent state:
-
-```prisma
-model KeyMeta {
-  id                   String   @id @default(uuid())
-  alias                String   @unique
-  serviceOwner         String   @map("service_owner")
-  encryptedKeyMaterial Bytes    @map("encrypted_key_material")
-  iv                   Bytes
-  authTag              Bytes    @map("auth_tag")
-  version              Int      @default(1)
-  state                KeyState @default(ENABLED)
-  createdAt            DateTime @default(now()) @map("created_at")
-  updatedAt            DateTime @updatedAt @map("updated_at")
-
-  @@index([serviceOwner])
-  @@map("key_meta")
-}
-
-model AuditLog {
-  id        String   @id @default(uuid())
-  timestamp DateTime @default(now())
-  serviceId String   @map("service_id")
-  action    String
-  keyId     String?  @map("key_id")
-  status    String
-  ipAddress String?  @map("ip_address")
-
-  @@index([serviceId])
-  @@index([keyId])
-  @@map("audit_logs")
+{
+  "event": "RevokeKey",
+  "timestamp": "2026-07-28T22:41:00.000Z",
+  "serviceId": "billing-service",
+  "keyAlias": "production-payment-key",
+  "status": "SUCCESS",
+  "ipAddress": "127.0.0.1"
 }
 ```
 
+- **HMAC Signature Header**: All webhooks include `X-Enclave-Signature: sha256=<hmac>` computed using `ENCLAVE_WEBHOOK_SECRET` for payload authenticity verification.
+
 ---
 
-## 6. Threat Vector Analysis & Security Invariants
+## 6. Zero-Trust IAM & RBAC Specification
+
+### 6.1 Dual Authentication Drivers
+
+1. **Bearer Token Authentication**: Pre-shared API keys supplied via `Authorization: Bearer enc_tok_...` and validated in constant time (`crypto.timingSafeEqual`).
+2. **mTLS Certificate Authentication**: Validated against client certificate Subject CN headers in constant time.
+
+---
+
+## 7. Threat Vector Analysis & Security Invariants
 
 | Threat Vector | Severity | Mitigation Strategy |
 |---------------|----------|---------------------|
 | **Side-Channel Timing Attacks** | Critical | All token and certificate comparisons use Node native `crypto.timingSafeEqual`. |
 | **Heap Inspection / Process Dumps** | High | Plaintext DEK buffers are zero-filled (`buffer.fill(0)`) immediately after use. |
 | **Database Compromise** | Critical | Database stores only encrypted DEK blobs wrapped via Master Key. Zero plaintext keys exist on disk. |
+| **Brute-Force & Denial of Service** | High | `@fastify/rate-limit` enforces 100 req/min per-token quotas with HTTP 429 response. |
+| **Secret Leaks** | High | Standardized `enc_` prefix schema enables automated GitHub/GitLab secret scanning detection. |
 | **Key Theft & Unauthorized Access** | High | Strict IAM RBAC checks enforce key alias and operation permissions per service identity. |
-| **Tampered Ciphertext Payloads** | High | AES-256-GCM 128-bit authentication tags verify integrity; tampered payloads fail deciphering instantly. |
-| **Cascading Key Compromise** | High | Individual key aliases can be independently rotated (`/rotate`) or revoked (`/revoke`). |
