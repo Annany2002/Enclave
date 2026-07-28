@@ -1,15 +1,15 @@
 import assert from 'node:assert';
-import { test, describe, before, after } from 'node:test';
 import crypto from 'node:crypto';
+import { after,before, describe, test } from 'node:test';
 
 const masterKeyHex = crypto.randomBytes(32).toString('hex');
 process.env.ENCLAVE_MASTER_KEY = masterKeyHex;
 process.env.NODE_ENV = 'test';
 
-import { createEnclaveServer } from './server.js';
-import { ShamirUnsealEngine } from './crypto/shamir-unseal.js';
-import { WebhookDispatcher } from './webhooks/webhook-dispatcher.js';
 import { KeyRotatorWorker } from './crypto/key-rotator-worker.js';
+import { ShamirUnsealEngine } from './crypto/shamir-unseal.js';
+import { createEnclaveServer } from './server.js';
+import { WebhookDispatcher } from './webhooks/webhook-dispatcher.js';
 
 describe('Enclave Server Integration Tests', () => {
   let fastifyInstance: any;
