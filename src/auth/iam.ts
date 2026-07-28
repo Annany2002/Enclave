@@ -21,6 +21,8 @@ export interface ServiceIdentity {
 /**
  * Identity Access Management & Role-Based Access Control evaluator.
  * Authenticates microservices via Bearer tokens or mTLS certificates and validates permissions.
+ * 
+ * @remark **Bearer Token Prefix**: `enc_tok_` (e.g. `enc_tok_billing_d45c7666...`)
  */
 export class IAMManager {
   private serviceRegistry: Map<string, ServiceIdentity> = new Map();
@@ -52,6 +54,8 @@ export class IAMManager {
 
   /**
    * Authenticates caller via Bearer token in constant time.
+   * 
+   * @remark **Bearer Token Prefix**: `enc_tok_`
    */
   public authenticateToken(token: string): ServiceIdentity | null {
     if (!token) return null;
