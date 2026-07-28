@@ -1,7 +1,8 @@
 import Fastify from 'fastify';
 import { fileURLToPath } from 'node:url';
 import { MasterKeyManager } from './crypto/master-key.js';
-import { InMemoryStorageAdapter } from './storage/storage-adapter.js';
+import { InMemoryStorageAdapter, IStorageAdapter } from './storage/storage-adapter.js';
+import { PrismaStorageAdapter } from './storage/prisma-adapter.js';
 import { IAMManager } from './auth/iam.js';
 import { registerEnclaveRoutes } from './api/routes.js';
 
@@ -9,14 +10,37 @@ import { registerEnclaveRoutes } from './api/routes.js';
  * Bootstraps the Enclave Fastify server instance with MasterKeyManager, StorageAdapter, and IAMManager.
  */
 export async function createEnclaveServer() {
+  const isProduction = process.env.NODE_ENV === 'production';
+  const isTest = process.env.NODE_ENV === 'test';
+
   const fastify = Fastify({
-    logger: {
-      level: process.env.LOG_LEVEL || 'info',
-    },
+    logger: isTest
+      ? false
+      : isProduction
+      ? { level: process.env.LOG_LEVEL || 'info' }
+      : {
+          level: process.env.LOG_LEVEL || 'info',
+          transport: {
+            target: 'pino-pretty',
+            options: {
+              colorize: true,
+              translateTime: 'HH:MM:ss',
+              ignore: 'pid,hostname',
+              singleLine: true,
+            },
+          },
+        },
   });
 
   const masterKeyManager = new MasterKeyManager();
-  const storageAdapter = new InMemoryStorageAdapter();
+
+  let storageAdapter: IStorageAdapter;
+  if (process.env.DATABASE_URL && !isTest) {
+    storageAdapter = new PrismaStorageAdapter();
+  } else {
+    storageAdapter = new InMemoryStorageAdapter();
+  }
+
   const iamManager = new IAMManager();
 
   registerEnclaveRoutes(fastify, masterKeyManager, storageAdapter, iamManager);
@@ -29,7 +53,7 @@ const mainFile = process.argv[1];
 const isMain = mainFile && (mainFile === currentFile || mainFile.endsWith('/server.js') || mainFile.endsWith('\\server.js'));
 
 if (isMain && process.env.NODE_ENV !== 'test') {
-  const port = Number(process.env.PORT) || 3000;
+  const port = Number(process.env.PORT) || 8200;
   const host = process.env.HOST || '0.0.0.0';
 
   createEnclaveServer()
