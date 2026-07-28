@@ -1,42 +1,41 @@
 # Enclave System Architecture & Operational Specification
 
-This document provides a principal-level architectural specification of the Enclave Key Management System (KMS) microservice and Client SDK.
+This document provides a principal-level architectural specification of the Enclave Key Management System (KMS) & Secret Enclave microservice.
 
 ---
 
 ## 1. Executive Summary & Core System Boundaries
 
-Enclave is a hardened, zero-trust Key Management System (KMS) and cryptographic microservice built with Node.js, Fastify, TypeScript, and PostgreSQL. It isolates sensitive cryptographic operations and data encryption keys (DEKs) away from application microservices.
+Enclave is a hardened, zero-trust Key Management System (KMS) and cryptographic microservice built with Node.js, Fastify, TypeScript, and PostgreSQL. It isolates sensitive cryptographic operations and Data Encryption Keys (DEKs) away from application microservices.
 
 ```mermaid
 graph TD
-    subgraph Client Services
+    subgraph Microservices / Callers
         AppA[Billing Microservice]
         AppB[Auth Microservice]
     end
 
-    subgraph Enclave Client SDK
-        SDK[enclave-client-sdk]
-        LRUCache[LRU Key Cache]
-    end
-
-    subgraph Enclave Server Microservice
+    subgraph Enclave KMS Microservice (Port 8200)
         API[Fastify API Router]
         IAM[Zero-Trust IAM & RBAC]
         Crypto[AES-256-GCM Crypto Engine]
-        Storage[Storage Adapter]
+        StorageAdapter[Storage Adapter Interface]
+        PrismaAdapter[Prisma PostgreSQL Adapter]
+        MemoryAdapter[In-Memory Adapter]
     end
 
     subgraph Persistent Storage
-        DB[(PostgreSQL Database)]
+        DB[(PostgreSQL / Neon DB)]
     end
 
-    AppA -->|mTLS / Bearer Token| SDK
-    SDK -->|1. Fetch/Cache DEK| API
+    AppA -->|Bearer Token / mTLS| API
+    AppB -->|Bearer Token / mTLS| API
     API --> IAM
     IAM -->|Authorize| Crypto
-    Crypto --> Storage
-    Storage -->|Encrypted DEK Blobs| DB
+    Crypto --> StorageAdapter
+    StorageAdapter --> PrismaAdapter
+    StorageAdapter --> MemoryAdapter
+    PrismaAdapter -->|Encrypted DEK Blobs| DB
 ```
 
 ---
@@ -121,7 +120,7 @@ sequenceDiagram
     participant API as API Layer (Fastify)
     participant IAM as IAM / RBAC Engine
     participant Crypto as Crypto Engine
-    participant DB as Storage (PostgreSQL)
+    participant DB as Storage (Prisma PostgreSQL)
 
     Microservice->>API: POST /api/v1/crypto/encrypt { keyAlias, plaintext }
     Note over API: Extracts Authorization header or mTLS cert
@@ -225,37 +224,7 @@ model AuditLog {
 
 ---
 
-## 6. Client SDK Architecture & Local Caching Strategy
-
-The `enclave-client-sdk` package provides two encryption modes:
-
-```text
-                           +----------------------------+
-                           |     enclave-client-sdk     |
-                           +----------------------------+
-                                  /              \
-                                 /                \
-            Local Caching Mode  /                  \  Remote Server Mode
-                               /                    \
-                              v                      v
-                +-------------------+          +-------------------+
-                | Local AES-256-GCM |          | Enclave HTTP API  |
-                | Cryptography      |          | Remote Encryption |
-                +-------------------+          +-------------------+
-```
-
-1. **Local Envelope Encryption Mode (Default)**:
-   - SDK calls `/api/v1/keys/fetch` once to retrieve the DEK.
-   - Caches DEK in an in-memory LRU cache (`KeyCache`) with configurable TTL (default: 5 mins).
-   - Executes `AES-256-GCM` encryption/decryption locally inside client application memory at sub-millisecond speeds (>100,000 ops/sec).
-   - Automatically wipes expired keys from LRU cache memory.
-
-2. **Remote API Mode**:
-   - SDK delegates raw plaintext and ciphertext payloads to the Enclave server via HTTP POST `/api/v1/crypto/encrypt`.
-
----
-
-## 7. Threat Vector Analysis & Security Invariants
+## 6. Threat Vector Analysis & Security Invariants
 
 | Threat Vector | Severity | Mitigation Strategy |
 |---------------|----------|---------------------|

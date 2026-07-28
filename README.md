@@ -8,12 +8,13 @@ Detailed architectural specification: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.m
 
 ## Architecture & Security Highlights
 
-- **Envelope Encryption**: Data Encryption Keys (DEKs) generated with `crypto.randomBytes(32)` and encrypted using 256-bit Master KEK via `aes-256-gcm`.
+- **Envelope Encryption**: Data Encryption Keys (DEKs) generated with `crypto.randomBytes(32)` and encrypted using a 256-bit Master KEK via `aes-256-gcm`.
 - **Memory Scrubbing**: Plaintext DEK buffers explicitly zeroed out (`buffer.fill(0)`) post-operation to prevent heap inspection.
 - **Timing-Safe Auth**: Token and certificate comparisons use `crypto.timingSafeEqual`.
 - **Zero-Trust IAM & RBAC**: Dual Bearer token and mTLS X.509 client certificate SAN authentication with fine-grained operation permissions.
 - **Shamir Secret Sharing**: Multi-operator threshold key splitting and unsealing.
 - **Key Revocation & Audit**: Dynamic key revocation with real-time audit logging and JSON trail export.
+- **PostgreSQL Persistence**: Prisma ORM persistence layer storing wrapped key metadata and structured audit logs.
 
 ---
 
@@ -21,69 +22,95 @@ Detailed architectural specification: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.m
 
 ### Prerequisites
 - Node.js >= 20.x
-- Docker & Docker Compose (for production container deployment)
+- PostgreSQL database (or Docker Compose)
 
 ### 1. Configure Environment
-Copy `.env.example` to `.env`:
+Copy `.env.example` to `.env` and set `ENCLAVE_MASTER_KEY` and `DATABASE_URL`:
 ```bash
 cp .env.example .env
 ```
 
-### 2. Build
+### 2. Sync Database Schema
+Apply Prisma schema migrations to your live PostgreSQL database:
 ```bash
-npm run build
+npx prisma db push
 ```
 
-### 3. Run Test Suite
+### 3. Development Workflow Commands
+
 ```bash
+# Start hot-reloading dev server (Port 8200)
+npm run dev
+
+# Zero-build typechecking & unused imports check
+npm run check
+
+# Zero-build test suite execution
 npm run test
-```
 
-### 4. Run via Docker Compose
-```bash
-docker-compose up --build -d
-```
-
-Check health status:
-```bash
-curl http://localhost:3000/healthz
+# Production build (compile TypeScript to dist/)
+npm run build
 ```
 
 ---
 
-## API Reference Summary
+## API Reference & Quick Verification
 
-### `POST /api/v1/keys/generate`
-Generates a new AES-256 Data Encryption Key (DEK).
-- **Header**: `Authorization: Bearer <service_token>`
-- **Body**: `{ "alias": "user-card-key" }`
-- **Response**: `{ "id": "uuid", "alias": "user-card-key", "version": 1 }`
+Server listens on **Port 8200**.
 
-### `POST /api/v1/crypto/encrypt`
-Encrypts plaintext payload on the server using a DEK.
-- **Header**: `Authorization: Bearer <service_token>`
-- **Body**: `{ "keyAlias": "user-card-key", "plaintext": "secret payload" }`
-- **Response**: `{ "ciphertextHex": "...", "ivHex": "...", "authTagHex": "...", "keyVersion": 1 }`
+### 1. Liveness & Health Probe
+```bash
+curl http://localhost:8200/healthz
+# Response: { "status": "ok", "unsealed": true }
+```
 
-### `POST /api/v1/crypto/decrypt`
-Decrypts ciphertext payload on the server.
-- **Header**: `Authorization: Bearer <service_token>`
-- **Body**: `{ "keyAlias": "user-card-key", "ciphertextHex": "...", "ivHex": "...", "authTagHex": "..." }`
-- **Response**: `{ "plaintext": "secret payload" }`
+### 2. Generate Data Encryption Key (DEK)
+```bash
+curl -X POST http://localhost:8200/api/v1/keys/generate \
+  -H "Authorization: Bearer billing-secret-token" \
+  -H "Content-Type: application/json" \
+  -d '{"alias": "production-payment-key"}'
+```
 
-### `POST /api/v1/keys/rotate`
-Rotates key version and re-encrypts DEK.
-- **Header**: `Authorization: Bearer <service_token>`
-- **Body**: `{ "keyAlias": "user-card-key" }`
-- **Response**: `{ "id": "...", "alias": "user-card-key", "version": 2 }`
+### 3. Encrypt Plaintext Payload
+```bash
+curl -X POST http://localhost:8200/api/v1/crypto/encrypt \
+  -H "Authorization: Bearer billing-secret-token" \
+  -H "Content-Type: application/json" \
+  -d '{"keyAlias": "production-payment-key", "plaintext": "my-secret-payload"}'
+```
 
-### `POST /api/v1/keys/revoke`
-Revokes a key alias (blocks cryptographic access).
-- **Header**: `Authorization: Bearer <service_token>`
-- **Body**: `{ "keyAlias": "user-card-key" }`
-- **Response**: `{ "id": "...", "state": "REVOKED" }`
+### 4. Decrypt Ciphertext Payload
+```bash
+curl -X POST http://localhost:8200/api/v1/crypto/decrypt \
+  -H "Authorization: Bearer billing-secret-token" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "keyAlias": "production-payment-key",
+    "ciphertextHex": "<CIPHERTEXT>",
+    "ivHex": "<IV>",
+    "authTagHex": "<AUTH_TAG>"
+  }'
+```
 
-### `GET /api/v1/audit/export`
-Exports audit log trail.
-- **Header**: `Authorization: Bearer <service_token>`
-- **Response**: `{ "logs": [...] }`
+### 5. Key Rotation
+```bash
+curl -X POST http://localhost:8200/api/v1/keys/rotate \
+  -H "Authorization: Bearer billing-secret-token" \
+  -H "Content-Type: application/json" \
+  -d '{"keyAlias": "production-payment-key"}'
+```
+
+### 6. Key Revocation
+```bash
+curl -X POST http://localhost:8200/api/v1/keys/revoke \
+  -H "Authorization: Bearer billing-secret-token" \
+  -H "Content-Type: application/json" \
+  -d '{"keyAlias": "production-payment-key"}'
+```
+
+### 7. Export Audit Log History
+```bash
+curl -H "Authorization: Bearer billing-secret-token" \
+  http://localhost:8200/api/v1/audit/export
+```
