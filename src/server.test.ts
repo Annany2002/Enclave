@@ -6,11 +6,10 @@ const masterKeyHex = crypto.randomBytes(32).toString('hex');
 process.env.ENCLAVE_MASTER_KEY = masterKeyHex;
 process.env.NODE_ENV = 'test';
 
-import { createEnclaveServer } from '../../enclave-server/dist/server.js';
-import { ShamirUnsealEngine } from '../../enclave-server/dist/crypto/shamir-unseal.js';
-import { EnclaveClient } from './client.js';
+import { createEnclaveServer } from './server.js';
+import { ShamirUnsealEngine } from './crypto/shamir-unseal.js';
 
-describe('Enclave End-to-End Integration Tests', () => {
+describe('Enclave Server Integration Tests', () => {
   let fastifyInstance: any;
   let serverUrl: string;
   const serviceToken = 'test-microservice-token-123';
@@ -45,65 +44,68 @@ describe('Enclave End-to-End Integration Tests', () => {
     assert.strictEqual(reconstructed, masterKeyHex);
   });
 
-  test('SDK generates key and performs remote encryption/decryption', async () => {
-    const client = new EnclaveClient({
-      baseUrl: serverUrl,
-      authToken: serviceToken,
-      enableLocalCaching: false,
+  test('Generates key and performs remote encryption/decryption', async () => {
+    const keyAlias = 'payment-card-key';
+    const genRes = await fetch(`${serverUrl}/api/v1/keys/generate`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${serviceToken}`,
+      },
+      body: JSON.stringify({ alias: keyAlias }),
     });
 
-    const keyAlias = 'payment-card-key';
-    const keyInfo = await client.generateKey(keyAlias);
+    assert.strictEqual(genRes.status, 200);
+    const keyInfo: any = await genRes.json();
     assert.strictEqual(keyInfo.alias, keyAlias);
 
     const plaintext = '4111-2222-3333-4444';
-    const encrypted = await client.encryptRemote(keyAlias, plaintext);
+    const encRes = await fetch(`${serverUrl}/api/v1/crypto/encrypt`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${serviceToken}`,
+      },
+      body: JSON.stringify({ keyAlias, plaintext }),
+    });
+
+    assert.strictEqual(encRes.status, 200);
+    const encrypted: any = await encRes.json();
     assert.strictEqual(typeof encrypted.ciphertextHex, 'string');
 
-    const decrypted = await client.decryptRemote(
-      keyAlias,
-      encrypted.ciphertextHex,
-      encrypted.ivHex,
-      encrypted.authTagHex
-    );
-
-    assert.strictEqual(decrypted, plaintext);
-  });
-
-  test('SDK performs high-speed local envelope encryption with DEK caching', async () => {
-    const client = new EnclaveClient({
-      baseUrl: serverUrl,
-      authToken: serviceToken,
-      enableLocalCaching: true,
+    const decRes = await fetch(`${serverUrl}/api/v1/crypto/decrypt`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${serviceToken}`,
+      },
+      body: JSON.stringify({
+        keyAlias,
+        ciphertextHex: encrypted.ciphertextHex,
+        ivHex: encrypted.ivHex,
+        authTagHex: encrypted.authTagHex,
+      }),
     });
 
-    const keyAlias = 'payment-card-key';
-    const secretMessage = 'Top Secret Vault Payload';
-
-    const encrypted = await client.encrypt(keyAlias, secretMessage);
-    const decrypted = await client.decrypt(
-      keyAlias,
-      encrypted.ciphertextHex,
-      encrypted.ivHex,
-      encrypted.authTagHex
-    );
-
-    assert.strictEqual(decrypted, secretMessage);
+    assert.strictEqual(decRes.status, 200);
+    const decrypted: any = await decRes.json();
+    assert.strictEqual(decrypted.plaintext, plaintext);
   });
 
-  test('SDK rejects unauthorized operations with 403 Forbidden', async () => {
-    const unauthorizedClient = new EnclaveClient({
-      baseUrl: serverUrl,
-      authToken: 'invalid-unregistered-token',
-      enableLocalCaching: false,
+  test('Rejects unauthorized operations with 403 Forbidden', async () => {
+    const res = await fetch(`${serverUrl}/api/v1/keys/generate`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer invalid-token',
+      },
+      body: JSON.stringify({ alias: 'unauthorized-alias' }),
     });
 
-    await assert.rejects(async () => {
-      await unauthorizedClient.generateKey('unauthorized-alias');
-    }, /403/);
+    assert.strictEqual(res.status, 403);
   });
 
-  test('Server supports key rotation and exposes prometheus metrics', async () => {
+  test('Supports key rotation and exposes prometheus metrics', async () => {
     const resMetrics = await fetch(`${serverUrl}/metrics`);
     assert.strictEqual(resMetrics.status, 200);
     const metricsText = await resMetrics.text();
@@ -123,14 +125,15 @@ describe('Enclave End-to-End Integration Tests', () => {
     assert.strictEqual(rotateData.version, 2);
   });
 
-  test('Server revokes key and blocks subsequent cryptographic access', async () => {
-    const client = new EnclaveClient({
-      baseUrl: serverUrl,
-      authToken: serviceToken,
-      enableLocalCaching: false,
+  test('Revokes key and blocks subsequent cryptographic access', async () => {
+    await fetch(`${serverUrl}/api/v1/keys/generate`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${serviceToken}`,
+      },
+      body: JSON.stringify({ alias: 'revocable-key' }),
     });
-
-    await client.generateKey('revocable-key');
 
     const resRevoke = await fetch(`${serverUrl}/api/v1/keys/revoke`, {
       method: 'POST',
@@ -143,12 +146,19 @@ describe('Enclave End-to-End Integration Tests', () => {
 
     assert.strictEqual(resRevoke.status, 200);
 
-    await assert.rejects(async () => {
-      await client.encryptRemote('revocable-key', 'fail payload');
-    }, /410/);
+    const resEnc = await fetch(`${serverUrl}/api/v1/crypto/encrypt`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${serviceToken}`,
+      },
+      body: JSON.stringify({ keyAlias: 'revocable-key', plaintext: 'fail payload' }),
+    });
+
+    assert.strictEqual(resEnc.status, 410);
   });
 
-  test('Server exports structured audit log history', async () => {
+  test('Exports structured audit log history', async () => {
     const resAudit = await fetch(`${serverUrl}/api/v1/audit/export`, {
       method: 'GET',
       headers: {

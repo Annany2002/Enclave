@@ -18,6 +18,10 @@ export interface ServiceIdentity {
   allowedOperations: EnclaveOperation[];
 }
 
+/**
+ * Identity Access Management & Role-Based Access Control evaluator.
+ * Authenticates microservices via Bearer tokens or mTLS certificates and validates permissions.
+ */
 export class IAMManager {
   private serviceRegistry: Map<string, ServiceIdentity> = new Map();
 
@@ -39,10 +43,16 @@ export class IAMManager {
     }
   }
 
+  /**
+   * Registers a microservice identity and permissions policy.
+   */
   public registerService(identity: ServiceIdentity): void {
     this.serviceRegistry.set(identity.serviceId, identity);
   }
 
+  /**
+   * Authenticates caller via Bearer token in constant time.
+   */
   public authenticateToken(token: string): ServiceIdentity | null {
     if (!token) return null;
 
@@ -55,6 +65,9 @@ export class IAMManager {
     return null;
   }
 
+  /**
+   * Authenticates caller via mTLS client certificate Subject CN header.
+   */
   public authenticateMtlsCert(clientCn: string): ServiceIdentity | null {
     if (!clientCn) return null;
 
@@ -67,6 +80,9 @@ export class IAMManager {
     return null;
   }
 
+  /**
+   * Evaluates RBAC permissions for a target key alias and requested operation.
+   */
   public authorize(
     identity: ServiceIdentity,
     keyAlias: string,
@@ -80,7 +96,6 @@ export class IAMManager {
       return false;
     }
 
-    // System-wide non-key operations
     if (keyAlias === '*' || operation === 'ExportAudit') {
       return true;
     }

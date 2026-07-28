@@ -42,4 +42,4 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Build Docker Image
-        run: docker build -t enclave-server:test -f packages/enclave-server/Dockerfile .
+        run: docker build -t enclave-server:test -f Dockerfile .

@@ -23,6 +23,9 @@ export interface AuditRecord {
   ipAddress?: string;
 }
 
+/**
+ * Storage adapter interface for key metadata persistence and audit logging.
+ */
 export interface IStorageAdapter {
   saveKey(
     id: string,
@@ -46,6 +49,9 @@ export interface IStorageAdapter {
   exportAuditLogs(): Promise<AuditRecord[]>;
 }
 
+/**
+ * In-memory storage adapter for development and testing environments.
+ */
 export class InMemoryStorageAdapter implements IStorageAdapter {
   private keys: Map<string, StoredKeyRecord> = new Map();
   private aliasIndex: Map<string, string> = new Map();
