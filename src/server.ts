@@ -1,16 +1,18 @@
-import Fastify from 'fastify';
-import { fileURLToPath } from 'node:url';
 import crypto from 'node:crypto';
+import { fileURLToPath } from 'node:url';
+
+import fastifyRateLimit from '@fastify/rate-limit';
 import fastifySwagger from '@fastify/swagger';
 import fastifySwaggerUi from '@fastify/swagger-ui';
-import fastifyRateLimit from '@fastify/rate-limit';
-import { MasterKeyManager } from './crypto/master-key.js';
-import { InMemoryStorageAdapter, IStorageAdapter } from './storage/storage-adapter.js';
-import { PrismaStorageAdapter } from './storage/prisma-adapter.js';
-import { IAMManager } from './auth/iam.js';
-import { WebhookDispatcher } from './webhooks/webhook-dispatcher.js';
-import { KeyRotatorWorker } from './crypto/key-rotator-worker.js';
+import Fastify from 'fastify';
+
 import { registerEnclaveRoutes } from './api/routes.js';
+import { IAMManager } from './auth/iam.js';
+import { KeyRotatorWorker } from './crypto/key-rotator-worker.js';
+import { MasterKeyManager } from './crypto/master-key.js';
+import { PrismaStorageAdapter } from './storage/prisma-adapter.js';
+import { InMemoryStorageAdapter, IStorageAdapter } from './storage/storage-adapter.js';
+import { WebhookDispatcher } from './webhooks/webhook-dispatcher.js';
 
 /**
  * Bootstraps the Enclave Fastify server instance with MasterKeyManager, StorageAdapter, IAMManager, WebhookDispatcher, and KeyRotatorWorker.
