@@ -2,13 +2,18 @@
 
 High-performance, production-grade Key Management System (KMS) & Secret Enclave microservice built with Fastify, TypeScript, PostgreSQL, and Node.js native `crypto`.
 
-## Architecture & Security
+Detailed architectural specification: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
-- **Envelope Encryption**: Data Encryption Keys (DEKs) are generated with `crypto.randomBytes(32)` and encrypted using a 256-bit Master Key (KEK) via `aes-256-gcm`.
-- **Memory Scrubbing**: Plaintext DEK buffers are explicitly zeroed out (`buffer.fill(0)`) post-operation to mitigate heap inspection risks.
-- **Timing-Safe Auth**: Token comparisons use `crypto.timingSafeEqual` to eliminate side-channel timing vectors.
-- **Zero-Trust IAM & RBAC**: Microservices authenticate via Bearer tokens or mTLS headers, enforced by fine-grained key alias and operation permissions (`Encrypt`, `Decrypt`, `GenerateKey`, `RotateKey`, `GetKey`).
-- **Audit Logging**: Every access attempt and cryptographic operation is logged with caller identity, timestamp, IP, and status.
+---
+
+## Architecture & Security Highlights
+
+- **Envelope Encryption**: Data Encryption Keys (DEKs) generated with `crypto.randomBytes(32)` and encrypted using 256-bit Master KEK via `aes-256-gcm`.
+- **Memory Scrubbing**: Plaintext DEK buffers explicitly zeroed out (`buffer.fill(0)`) post-operation to prevent heap inspection.
+- **Timing-Safe Auth**: Token and certificate comparisons use `crypto.timingSafeEqual`.
+- **Zero-Trust IAM & RBAC**: Dual Bearer token and mTLS X.509 client certificate SAN authentication with fine-grained operation permissions.
+- **Shamir Secret Sharing**: Multi-operator threshold key splitting and unsealing.
+- **Key Revocation & Audit**: Dynamic key revocation with real-time audit logging and JSON trail export.
 
 ---
 
@@ -16,19 +21,25 @@ High-performance, production-grade Key Management System (KMS) & Secret Enclave 
 
 ### Prerequisites
 - Node.js >= 20.x
-- Docker & Docker Compose (for containerized deployment)
+- Docker & Docker Compose (for production container deployment)
 
-### 1. Build
+### 1. Configure Environment
+Copy `.env.example` to `.env`:
+```bash
+cp .env.example .env
+```
+
+### 2. Build
 ```bash
 npm run build
 ```
 
-### 2. Run Tests
+### 3. Run Test Suite
 ```bash
 npm run test
 ```
 
-### 3. Run via Docker Compose
+### 4. Run via Docker Compose
 ```bash
 docker-compose up --build -d
 ```
@@ -40,22 +51,39 @@ curl http://localhost:3000/healthz
 
 ---
 
-## API Endpoints
+## API Reference Summary
 
 ### `POST /api/v1/keys/generate`
 Generates a new AES-256 Data Encryption Key (DEK).
 - **Header**: `Authorization: Bearer <service_token>`
-- **Body**: `{ "alias": "user-pii-key" }`
-- **Response**: `{ "id": "uuid", "alias": "user-pii-key", "version": 1, "createdAt": "ISO-date" }`
+- **Body**: `{ "alias": "user-card-key" }`
+- **Response**: `{ "id": "uuid", "alias": "user-card-key", "version": 1 }`
 
 ### `POST /api/v1/crypto/encrypt`
 Encrypts plaintext payload on the server using a DEK.
 - **Header**: `Authorization: Bearer <service_token>`
-- **Body**: `{ "keyAlias": "user-pii-key", "plaintext": "secret payload" }`
+- **Body**: `{ "keyAlias": "user-card-key", "plaintext": "secret payload" }`
 - **Response**: `{ "ciphertextHex": "...", "ivHex": "...", "authTagHex": "...", "keyVersion": 1 }`
 
 ### `POST /api/v1/crypto/decrypt`
 Decrypts ciphertext payload on the server.
 - **Header**: `Authorization: Bearer <service_token>`
-- **Body**: `{ "keyAlias": "user-pii-key", "ciphertextHex": "...", "ivHex": "...", "authTagHex": "..." }`
+- **Body**: `{ "keyAlias": "user-card-key", "ciphertextHex": "...", "ivHex": "...", "authTagHex": "..." }`
 - **Response**: `{ "plaintext": "secret payload" }`
+
+### `POST /api/v1/keys/rotate`
+Rotates key version and re-encrypts DEK.
+- **Header**: `Authorization: Bearer <service_token>`
+- **Body**: `{ "keyAlias": "user-card-key" }`
+- **Response**: `{ "id": "...", "alias": "user-card-key", "version": 2 }`
+
+### `POST /api/v1/keys/revoke`
+Revokes a key alias (blocks cryptographic access).
+- **Header**: `Authorization: Bearer <service_token>`
+- **Body**: `{ "keyAlias": "user-card-key" }`
+- **Response**: `{ "id": "...", "state": "REVOKED" }`
+
+### `GET /api/v1/audit/export`
+Exports audit log trail.
+- **Header**: `Authorization: Bearer <service_token>`
+- **Response**: `{ "logs": [...] }`
